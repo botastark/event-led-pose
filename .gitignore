@@ -1,0 +1,5 @@
+/data/raw/
+/data/reports/
+*.raw
+*.h5
+*.hdf5

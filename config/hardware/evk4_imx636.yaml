@@ -1,0 +1,17 @@
+camera_family: prophesee_evk4
+sensor: sony_imx636
+sensor_resolution_px: [1280, 720]
+sensor_pixel_pitch_um: [4.86, 4.86]
+usb_vid: "04b4"
+usb_pid: "00f5"
+observed_usb_speed_mbps: 5000
+host_os: ubuntu_26_04
+container_os: ubuntu_24_04
+architecture: amd64
+cpu_avx2_required: true
+firmware_version: null
+camera_serial: null
+lens_model: null
+openeb_version: null
+ubuntu_base_digest: null
+

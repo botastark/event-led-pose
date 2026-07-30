@@ -1,0 +1,37 @@
+FROM docker.io/library/ubuntu:24.04@sha256:52df9b1ee71626e0088f7d400d5c6b5f7bb916f8f0c82b474289a4ece6cf3faf
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG OPENEB_VERSION=5.3.0
+ARG NUMPY_VERSION=1:1.26.4+ds-6ubuntu1
+ARG H5PY_VERSION=3.10.0-1ubuntu3
+
+LABEL org.opencontainers.image.title="event-led-pose OpenEB runtime"
+LABEL org.opencontainers.image.description="Pinned Ubuntu 24.04 runtime for Prophesee EVK4 replay and acquisition"
+LABEL org.opencontainers.image.version="5.3.0-r2-ubuntu24"
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        software-properties-common \
+    && curl --fail --show-error --silent --location \
+        https://propheseeai.jfrog.io/artifactory/api/security/keypair/prophesee-gpg/public \
+        --output /etc/apt/trusted.gpg.d/prophesee.asc \
+    && add-apt-repository --yes \
+        'https://propheseeai.jfrog.io/artifactory/openeb-debian/' \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        "metavision-openeb=${OPENEB_VERSION}" \
+        "python3-numpy=${NUMPY_VERSION}" \
+        "python3-h5py=${H5PY_VERSION}" \
+        "python3-h5py-serial=${H5PY_VERSION}" \
+    && test "$(dpkg-query -W -f='${Version}' metavision-openeb)" = "${OPENEB_VERSION}" \
+    && test "$(dpkg-query -W -f='${Version}' python3-numpy)" = "${NUMPY_VERSION}" \
+    && test "$(dpkg-query -W -f='${Version}' python3-h5py)" = "${H5PY_VERSION}" \
+    && python3 -c 'import numpy, h5py; from metavision_hal import DeviceDiscovery; from metavision_core.event_io import EventsIterator; print("Runtime Python imports: PASS")' \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PYTHONNOUSERSITE=1
+
+CMD ["metavision_platform_info"]
+
