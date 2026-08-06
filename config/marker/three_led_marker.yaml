@@ -1,0 +1,16 @@
+marker_name: three_frequency_led_triangle
+
+frequency_tolerance_hz: 5.0
+
+leds:
+  - id: led_165
+    expected_frequency_hz: 165.0
+    position_m: [null, null, null]
+
+  - id: led_366
+    expected_frequency_hz: 366.0
+    position_m: [null, null, null]
+
+  - id: led_596
+    expected_frequency_hz: 596.0
+    position_m: [null, null, null]

@@ -3,3 +3,11 @@
 *.raw
 *.h5
 *.hdf5
+/tools/__pycache__/
+
+# Python-generated files
+__pycache__/
+*.py[cod]
+# Local development backups
+*.before-*
+*.bak
