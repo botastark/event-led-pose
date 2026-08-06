@@ -1,0 +1,73 @@
+{
+  "ambient": "/reports/ambient_default_evt3_5s.npz",
+  "ambient_duration_s": 4.990948,
+  "block_size": 4,
+  "block_threshold_eps": 800.0,
+  "detections": [
+    {
+      "bbox": {
+        "max_x": 839,
+        "max_y": 367,
+        "min_x": 760,
+        "min_y": 268
+      },
+      "block_count": 316,
+      "center_x": 800.6899683778279,
+      "center_y": 321.1299834137951,
+      "signal_rate_eps": 3054975.1307091964
+    },
+    {
+      "bbox": {
+        "max_x": 707,
+        "max_y": 199,
+        "min_x": 620,
+        "min_y": 132
+      },
+      "block_count": 227,
+      "center_x": 666.7672057788227,
+      "center_y": 162.27221255814854,
+      "signal_rate_eps": 2879890.4236150295
+    },
+    {
+      "bbox": {
+        "max_x": 587,
+        "max_y": 375,
+        "min_x": 492,
+        "min_y": 276
+      },
+      "block_count": 380,
+      "center_x": 537.5907457046541,
+      "center_y": 325.2400114507369,
+      "signal_rate_eps": 2346019.1127210334
+    }
+  ],
+  "geometry": {
+    "height": 720,
+    "width": 1280
+  },
+  "marker": "/reports/marker_static_default_evt3_10s.npz",
+  "marker_center_px": {
+    "x": 668.349306620435,
+    "y": 269.5474024742269
+  },
+  "marker_duration_s": 9.990988,
+  "min_component_blocks": 20,
+  "pairwise_distances": [
+    {
+      "distance_px": 207.77655715545635,
+      "first": 0,
+      "second": 1
+    },
+    {
+      "distance_px": 263.1313233001589,
+      "first": 0,
+      "second": 2
+    },
+    {
+      "distance_px": 207.95446932727464,
+      "first": 1,
+      "second": 2
+    }
+  ],
+  "positive_difference_rate_eps": 9047907.231590575
+}
