@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 readonly USB_ID="04b4:00f5"
-readonly IMAGE="${OPENEB_IMAGE:-localhost/event-led-pose/openeb-runtime:5.3.0-r2-ubuntu24}"
+readonly IMAGE="${OPENEB_IMAGE:-localhost/event-led-pose/openeb-runtime:5.3.0-r3-ubuntu24}"
 
 fail()
 {

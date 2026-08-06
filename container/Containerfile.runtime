@@ -9,7 +9,7 @@ LABEL org.opencontainers.image.title="event-led-pose OpenEB runtime"
 LABEL org.opencontainers.image.description="Pinned Ubuntu 24.04 runtime for Prophesee EVK4 replay and acquisition"
 LABEL org.opencontainers.image.version="5.3.0-r2-ubuntu24"
 
-RUN apt-get update \
+RUN  apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
@@ -21,6 +21,7 @@ RUN apt-get update \
         'https://propheseeai.jfrog.io/artifactory/openeb-debian/' \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
+        python3-opencv \
         "metavision-openeb=${OPENEB_VERSION}" \
         "python3-numpy=${NUMPY_VERSION}" \
         "python3-h5py=${H5PY_VERSION}" \
@@ -28,7 +29,7 @@ RUN apt-get update \
     && test "$(dpkg-query -W -f='${Version}' metavision-openeb)" = "${OPENEB_VERSION}" \
     && test "$(dpkg-query -W -f='${Version}' python3-numpy)" = "${NUMPY_VERSION}" \
     && test "$(dpkg-query -W -f='${Version}' python3-h5py)" = "${H5PY_VERSION}" \
-    && python3 -c 'import numpy, h5py; from metavision_hal import DeviceDiscovery; from metavision_core.event_io import EventsIterator; print("Runtime Python imports: PASS")' \
+    && python3 -c 'import numpy, h5py, cv2; from metavision_hal import DeviceDiscovery; from metavision_core.event_io import EventsIterator; print("Runtime Python imports: PASS")' \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PYTHONNOUSERSITE=1
