@@ -61,6 +61,7 @@ cleanup()
 trap cleanup EXIT
 
 xhost "+SI:localuser:${host_user}" >/dev/null
+declare -a podman_args=()
 
 if (( $# == 0 )); then
     container_command=(bash --noprofile --norc -i)
@@ -95,6 +96,8 @@ podman run --rm -it \
     --env="DISPLAY=$DISPLAY" \
     --env=HOME=/tmp \
     --env=QT_X11_NO_MITSHM=1 \
+    --env=LIBGL_ALWAYS_SOFTWARE=1 \
+    --env=MESA_LOADER_DRIVER_OVERRIDE=llvmpipe \
     --env='PS1=(openeb) \w \$ ' \
     --volume=/tmp/.X11-unix:/tmp/.X11-unix:ro \
     --volume="$repo_root:/workspace:rw" \

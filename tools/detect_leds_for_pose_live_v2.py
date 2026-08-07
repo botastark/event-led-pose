@@ -58,7 +58,8 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--serial", default="00050946")
-
+    parser.add_argument("--input", default = None, help="Optional input file (otherwise live camera).")
+    parser.add_argument("--output", default = None, help="Optional output file (otherwise live display).")
     parser.add_argument(
         "--slice-us",
         type=int,
@@ -329,13 +330,23 @@ def main() -> int:
         raise ValueError("--event-stride must be positive")
 
     cosine, sine, bins_per_second = build_phase_tables(args.phase_bin_us)
+    if args.input is not None:
+        print(f"Reading events from {args.input}")
+        stream = EventsIterator(
+            input_path=args.input,
+            mode="delta_t",
+            delta_t=args.slice_us,
+            relative_timestamps=False,
+        )
+    else:
+        print(f"Using live camera serial {args.serial}")
+        stream = EventsIterator(
+            input_path=args.serial,
+            mode="delta_t",
+            delta_t=args.slice_us,
+            relative_timestamps=False,
+        )
 
-    stream = EventsIterator(
-        input_path=args.serial,
-        mode="delta_t",
-        delta_t=args.slice_us,
-        relative_timestamps=False,
-    )
 
     sensor_height, sensor_width = stream.get_size()
     grid_width = math.ceil(sensor_width / args.block_size)
@@ -366,13 +377,13 @@ def main() -> int:
     base_ratio = args.minimum_peak_ratio_base
     MIN_SUPPORT = {
         0: base_support,          # green
-        1: base_support * 0.9,    # yellow: slightly relaxed
-        2: base_support * 2.0,    # blue: much stricter
+        1: base_support * 0.85,    # yellow: slightly relaxed
+        2: base_support * 0.8,    # blue:
     }
     MIN_PEAK_RATIO = {
         0: base_ratio,            # green
-        1: base_ratio * 0.95,     # yellow
-        2: base_ratio * 1.4,      # blue
+        1: base_ratio * 0.85,     # yellow
+        2: base_ratio * 0.7      # blue
     }
 
     # Temporal lock counters per frequency.
@@ -389,6 +400,7 @@ def main() -> int:
         )
         for freq in FREQUENCIES_HZ
     ]
+
 
     with MTWindow(
         "Short-window LED detection for pose (v2)",
