@@ -1,0 +1,16 @@
+ARG BASE_IMAGE=localhost/event-led-pose/openeb-runtime:5.3.0-r2-ubuntu24
+FROM ${BASE_IMAGE}
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        cmake \
+        ninja-build \
+        usbutils \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+CMD ["bash"]
