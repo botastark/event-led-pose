@@ -31,10 +31,10 @@ except ImportError:  # pragma: no cover
     cv2 = None
 
 
-FREQUENCIES_HZ: Tuple[float, float, float] = (165.0, 366.0, 596.0)
+FREQUENCIES_HZ: Tuple[float, float, float] = (165.0, 365.0, 596.0)
 COLORS: Tuple[Tuple[int, int, int], ...] = (
     (0, 255, 0),    # ~165 Hz: green
-    (0, 220, 255),  # ~366 Hz: yellow
+    (0, 220, 255),  # ~365 Hz: yellow
     (255, 100, 0),  # ~596 Hz: blue
 )
 
@@ -403,7 +403,7 @@ def main() -> int:
 
 
     with MTWindow(
-        "Short-window LED detection for pose (v2)",
+        "Short-window LED detection for pose",
         sensor_width,
         sensor_height,
         BaseWindow.RenderMode.BGR,
