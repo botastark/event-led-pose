@@ -22,6 +22,9 @@ RUN  apt-get update \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
         python3-opencv \
+        cmake \
+        build-essential \
+        pkg-config \
         "metavision-openeb=${OPENEB_VERSION}" \
         "python3-numpy=${NUMPY_VERSION}" \
         "python3-h5py=${H5PY_VERSION}" \
