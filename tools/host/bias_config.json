@@ -1,0 +1,12 @@
+{
+  "serial": "00050946",
+  "biases": {
+    "bias_diff_on": 140,
+    "bias_diff_off": 190,
+    "bias_refr": 55,
+    "bias_fo": 55,
+    "bias_hpf": 0
+  },
+  "png_rate_hz": 30,
+  "accumulation_time_us": 10000
+}
