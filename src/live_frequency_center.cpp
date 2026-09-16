@@ -5,6 +5,7 @@
 
 #include <metavision/sdk/base/events/event_cd.h>
 #include <metavision/sdk/stream/camera.h>
+#include <metavision/hal/facilities/i_ll_biases.h>
 
 #include <array>
 #include <atomic>
@@ -12,6 +13,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <fstream>
+#include <regex>
+#include <sstream>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -63,7 +67,7 @@ constexpr std::array<FrequencyConfig, 3> FREQ = {{
 constexpr std::uint8_t NO_CANDIDATE = 0xFF;
 
 // Same-polarity burst suppression.
-constexpr std::uint32_t BURST_MERGE_US = 240;
+constexpr std::uint32_t BURST_MERGE_US = 3600;
 
 // Intervals larger than this cannot be represented by uint16_t.
 // Our largest useful interval is 4T_165 ~= 24.2 ms, so uint16_t
@@ -74,7 +78,7 @@ constexpr std::uint32_t MAX_STORED_DT_US = 30000;
 constexpr std::uint32_t CANDIDATE_TIMEOUT_US = 40000;
 
 // Opposite-transition half-period tolerance.
-constexpr std::uint32_t CROSS_TOLERANCE_PERMILLE = 40; // 8%
+constexpr std::uint32_t CROSS_TOLERANCE_PERMILLE = 80; // 8%
 
 // Robustness thresholds:
 //
@@ -86,8 +90,8 @@ constexpr std::uint32_t CROSS_TOLERANCE_PERMILLE = 40; // 8%
 //   2 valid full-period intervals from one transition direction
 //   when the other polarity is weak/missing.
 //
-constexpr int MIN_BOTH_EDGE_MATCHES = 4;
-constexpr int MIN_SINGLE_EDGE_MATCHES = 6;
+constexpr int MIN_BOTH_EDGE_MATCHES = 2;
+constexpr int MIN_SINGLE_EDGE_MATCHES = 2;
 
 
 // ============================================================
@@ -479,6 +483,7 @@ inline Result process_event(PixelState &s,
     const std::uint8_t id =
         classify_interval(dt);
 
+
     if (id == NO_CANDIDATE)
         return out;
 
@@ -524,6 +529,21 @@ struct Options {
 
     // Hard bound per frequency for close-up/high-rate LEDs.
     std::size_t center_max_samples = 20000;
+
+    // Custom JSON file with a nested "biases" object.
+    // Example:
+    // {
+    //   "biases": {
+    //     "bias_diff_on": 140,
+    //     "bias_diff_off": 190,
+    //     "bias_refr": 55,
+    //     "bias_fo": 55,
+    //     "bias_hpf": 0
+    //   }
+    // }
+    std::string bias_config_path;
+
+    bool print_biases = false;
 };
 
 Options parse_args(int argc, char **argv) {
@@ -592,6 +612,15 @@ Options parse_args(int argc, char **argv) {
             o.center_max_samples =
                 static_cast<std::size_t>(std::stoull(argv[i]));
         }
+        else if (a == "--bias-config") {
+            if (++i >= argc)
+                throw std::runtime_error("--bias-config needs path");
+
+            o.bias_config_path = argv[i];
+        }
+        else if (a == "--print-biases") {
+            o.print_biases = true;
+        }
         else if (a == "--help" || a == "-h") {
             std::cout
                 << "Usage: live_frequency_center [options]\n"
@@ -603,7 +632,9 @@ Options parse_args(int argc, char **argv) {
                 << "  --center-stride N\n"
                 << "  --center-window-us N\n"
                 << "  --center-update-us N\n"
-                << "  --center-max-samples N\n";
+                << "  --center-max-samples N\n"
+                << "  --bias-config FILE.json\n"
+                << "  --print-biases\n";
 
             std::exit(0);
         }
@@ -614,6 +645,132 @@ Options parse_args(int argc, char **argv) {
     }
 
     return o;
+}
+
+
+struct BiasConfig {
+    int bias_diff_on = 0;
+    int bias_diff_off = 0;
+    int bias_refr = 0;
+    int bias_fo = 0;
+    int bias_hpf = 0;
+};
+
+std::string read_text_file(const std::string &path) {
+    std::ifstream input(path);
+
+    if (!input) {
+        throw std::runtime_error(
+            "Could not open bias config: " + path);
+    }
+
+    std::ostringstream buffer;
+    buffer << input.rdbuf();
+    return buffer.str();
+}
+
+int parse_required_json_int(const std::string &json,
+                            const char *key) {
+    // The input format is intentionally small and fixed. We search for an
+    // integer value associated with a quoted key rather than introducing a
+    // JSON dependency in the low-latency executable.
+    const std::regex pattern(
+        std::string("\\\"") + key +
+        "\\\"\\s*:\\s*(-?[0-9]+)");
+
+    std::smatch match;
+
+    if (!std::regex_search(json, match, pattern)) {
+        throw std::runtime_error(
+            std::string("Missing integer bias '") +
+            key + "' in bias config");
+    }
+
+    return std::stoi(match[1].str());
+}
+
+BiasConfig load_bias_config(const std::string &path) {
+    const std::string json = read_text_file(path);
+
+    // Require the expected nested section so that a random JSON file with
+    // similarly named keys is not silently accepted.
+    if (json.find("\"biases\"") == std::string::npos) {
+        throw std::runtime_error(
+            "Bias config does not contain a 'biases' object: " + path);
+    }
+
+    BiasConfig config;
+    config.bias_diff_on =
+        parse_required_json_int(json, "bias_diff_on");
+    config.bias_diff_off =
+        parse_required_json_int(json, "bias_diff_off");
+    config.bias_refr =
+        parse_required_json_int(json, "bias_refr");
+    config.bias_fo =
+        parse_required_json_int(json, "bias_fo");
+    config.bias_hpf =
+        parse_required_json_int(json, "bias_hpf");
+
+    return config;
+}
+
+void print_current_biases(Metavision::Camera &camera) {
+    auto &biases =
+        camera.get_facility<Metavision::I_LL_Biases>();
+
+    static constexpr const char *NAMES[] = {
+        "bias_diff_on",
+        "bias_diff_off",
+        "bias_refr",
+        "bias_fo",
+        "bias_hpf"
+    };
+
+    std::cout << "Active camera biases:\n";
+
+    for (const char *name : NAMES) {
+        std::cout
+            << "  "
+            << name
+            << " = "
+            << biases.get(name)
+            << "\n";
+    }
+}
+
+void apply_bias_config(Metavision::Camera &camera,
+                       const BiasConfig &config) {
+    auto &biases =
+        camera.get_facility<Metavision::I_LL_Biases>();
+
+    const auto set_bias =
+        [&](const char *name, int requested) {
+            if (!biases.set(name, requested)) {
+                throw std::runtime_error(
+                    std::string("Failed to set ") +
+                    name + "=" +
+                    std::to_string(requested));
+            }
+
+            const int active = biases.get(name);
+
+            std::cout
+                << "  "
+                << name
+                << ": requested="
+                << requested
+                << " active="
+                << active
+                << "\n";
+        };
+
+    std::cout << "Applying sensor biases:\n";
+
+    set_bias("bias_diff_on",  config.bias_diff_on);
+    set_bias("bias_diff_off", config.bias_diff_off);
+    set_bias("bias_refr",     config.bias_refr);
+    set_bias("bias_fo",       config.bias_fo);
+    set_bias("bias_hpf",      config.bias_hpf);
 }
 
 } // namespace
@@ -632,6 +789,27 @@ int main(int argc, char **argv) {
 
         Camera camera =
             Camera::from_first_available();
+
+        // Biases are applied before camera.start(), so irrelevant sensor
+        // activity can be reduced before events reach the host filter.
+        if (!options.bias_config_path.empty()) {
+            const BiasConfig bias_config =
+                load_bias_config(
+                    options.bias_config_path);
+
+            std::cout
+                << "Loaded bias config: "
+                << options.bias_config_path
+                << "\n";
+
+            apply_bias_config(
+                camera,
+                bias_config);
+        }
+
+        if (options.print_biases) {
+            print_current_biases(camera);
+        }
 
         const auto &geometry =
             camera.geometry();

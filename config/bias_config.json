@@ -1,8 +1,8 @@
 {
   "serial": "00050946",
   "biases": {
-    "bias_diff_on": 140,
-    "bias_diff_off": 190,
+    "bias_diff_on": 50,
+    "bias_diff_off": 80,
     "bias_refr": 55,
     "bias_fo": 55,
     "bias_hpf": 0
