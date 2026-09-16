@@ -28,4 +28,5 @@ compile_commands.json
 *~
 .DS_Store
 
-/data/
+data/
+data/videos/*
