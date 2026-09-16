@@ -15,6 +15,31 @@ find_package(
 find_package(OpenGL REQUIRED)
 find_package(GLEW REQUIRED)
 find_package(glfw3 REQUIRED)
+find_package(Threads REQUIRED)
+
+add_library(
+    center_worker
+    src/center_worker.cpp
+)
+
+target_include_directories(
+    center_worker
+    PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(
+    center_worker
+    PUBLIC
+    Threads::Threads
+)
+
+target_compile_options(
+    center_worker
+    PRIVATE
+    -O3
+    -march=native
+)
 
 add_library(
     fast_event_viewer
@@ -30,9 +55,11 @@ target_include_directories(
 target_link_libraries(
     fast_event_viewer
     PUBLIC
+    center_worker
     OpenGL::GL
     GLEW::GLEW
     glfw
+    Threads::Threads
 )
 
 target_compile_options(
@@ -43,22 +70,28 @@ target_compile_options(
 )
 
 add_executable(
-    live_frequency_ring
-    src/live_frequency_ring.cpp
+    live_frequency_center
+    src/live_frequency_center.cpp
+)
+
+target_include_directories(
+    live_frequency_center
+    PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
 target_link_libraries(
-    live_frequency_ring
+    live_frequency_center
     PRIVATE
     MetavisionSDK::core
     MetavisionSDK::stream
     fast_event_viewer
+    center_worker
     Threads::Threads
-
 )
 
 target_compile_options(
-    live_frequency_ring
+    live_frequency_center
     PRIVATE
     -O3
     -march=native

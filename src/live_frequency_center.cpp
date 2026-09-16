@@ -1,4 +1,5 @@
 #include "fast_event_viewer.hpp"
+#include "center_worker.hpp"
 #include "packed_event.hpp"
 #include "spsc_ring.hpp"
 
@@ -62,7 +63,7 @@ constexpr std::array<FrequencyConfig, 3> FREQ = {{
 constexpr std::uint8_t NO_CANDIDATE = 0xFF;
 
 // Same-polarity burst suppression.
-constexpr std::uint32_t BURST_MERGE_US = 120;
+constexpr std::uint32_t BURST_MERGE_US = 240;
 
 // Intervals larger than this cannot be represented by uint16_t.
 // Our largest useful interval is 4T_165 ~= 24.2 ms, so uint16_t
@@ -73,7 +74,7 @@ constexpr std::uint32_t MAX_STORED_DT_US = 30000;
 constexpr std::uint32_t CANDIDATE_TIMEOUT_US = 40000;
 
 // Opposite-transition half-period tolerance.
-constexpr std::uint32_t CROSS_TOLERANCE_PERMILLE = 50; // 8%
+constexpr std::uint32_t CROSS_TOLERANCE_PERMILLE = 40; // 8%
 
 // Robustness thresholds:
 //
@@ -85,7 +86,7 @@ constexpr std::uint32_t CROSS_TOLERANCE_PERMILLE = 50; // 8%
 //   2 valid full-period intervals from one transition direction
 //   when the other polarity is weak/missing.
 //
-constexpr int MIN_BOTH_EDGE_MATCHES = 6;
+constexpr int MIN_BOTH_EDGE_MATCHES = 4;
 constexpr int MIN_SINGLE_EDGE_MATCHES = 6;
 
 
@@ -510,6 +511,19 @@ struct Options {
     std::uint64_t max_filter_backlog_events = 100000;
 
     std::size_t filter_ring_capacity = 1u << 19;
+
+    // Center estimation is a separate lossy diagnostic path.
+    // Only every Nth classified event is copied to it.
+    std::uint32_t center_stride = 4;
+
+    // Sliding event-time window for current center.
+    std::uint32_t center_window_us = 20000;
+
+    // Center worker update period.
+    std::uint32_t center_update_us = 5000;
+
+    // Hard bound per frequency for close-up/high-rate LEDs.
+    std::size_t center_max_samples = 20000;
 };
 
 Options parse_args(int argc, char **argv) {
@@ -547,14 +561,49 @@ Options parse_args(int argc, char **argv) {
             o.max_filter_backlog_events =
                 std::stoull(argv[i]);
         }
+        else if (a == "--center-stride") {
+            if (++i >= argc)
+                throw std::runtime_error("--center-stride needs value");
+
+            o.center_stride =
+                static_cast<std::uint32_t>(std::stoul(argv[i]));
+
+            if (o.center_stride == 0)
+                throw std::runtime_error("--center-stride must be >= 1");
+        }
+        else if (a == "--center-window-us") {
+            if (++i >= argc)
+                throw std::runtime_error("--center-window-us needs value");
+
+            o.center_window_us =
+                static_cast<std::uint32_t>(std::stoul(argv[i]));
+        }
+        else if (a == "--center-update-us") {
+            if (++i >= argc)
+                throw std::runtime_error("--center-update-us needs value");
+
+            o.center_update_us =
+                static_cast<std::uint32_t>(std::stoul(argv[i]));
+        }
+        else if (a == "--center-max-samples") {
+            if (++i >= argc)
+                throw std::runtime_error("--center-max-samples needs value");
+
+            o.center_max_samples =
+                static_cast<std::size_t>(std::stoull(argv[i]));
+        }
         else if (a == "--help" || a == "-h") {
             std::cout
-                << "Usage: live_frequency_transition_ring [options]\n"
+                << "Usage: live_frequency_center [options]\n"
                 << "  --visualize\n"
                 << "  --show-raw\n"
                 << "  --display-fps N\n"
                 << "  --persistence-us N\n"
-                << "  --max-filter-backlog N\n";
+                << "  --max-filter-backlog N\n"
+                << "  --center-stride N\n"
+                << "  --center-window-us N\n"
+                << "  --center-update-us N\n"
+                << "  --center-max-samples N\n";
 
             std::exit(0);
         }
@@ -574,6 +623,8 @@ int main(int argc, char **argv) {
     using namespace Metavision;
     using event_led_pose::FastEventViewer;
     using event_led_pose::SpscRing;
+    using event_led_pose::CenterStore;
+    using event_led_pose::CenterWorker;
 
     try {
         const Options options =
@@ -624,6 +675,27 @@ int main(int argc, char **argv) {
             filter_input(
                 options.filter_ring_capacity);
 
+        // ----------------------------------------------------
+        // CLASSIFIED EVENTS -> CENTER WORKER
+        //
+        // This is a separate lossy path. The frequency worker never
+        // waits for center calculation or visualization.
+        // ----------------------------------------------------
+
+        CenterStore center_store;
+
+        CenterWorker::Config center_cfg;
+        center_cfg.window_us = options.center_window_us;
+        center_cfg.update_period_us = options.center_update_us;
+        center_cfg.max_samples_per_frequency =
+            options.center_max_samples;
+
+        CenterWorker center_worker(
+            center_cfg,
+            center_store);
+
+        center_worker.start();
+
         std::unique_ptr<FastEventViewer>
             viewer;
 
@@ -642,7 +714,9 @@ int main(int argc, char **argv) {
 
             viewer =
                 std::make_unique<
-                    FastEventViewer>(cfg);
+                    FastEventViewer>(
+                        cfg,
+                        &center_store);
         }
 
         std::atomic<bool> stop{false};
@@ -683,6 +757,7 @@ int main(int argc, char **argv) {
                 local_counts{};
 
             std::uint64_t local_stale_skips = 0;
+            std::uint64_t center_counter = 0;
 
             while (!stop.load(
                 std::memory_order_acquire))
@@ -717,6 +792,8 @@ int main(int argc, char **argv) {
 
                 if (viewer)
                     viewer->freq_begin_batch();
+
+                center_worker.begin_batch();
 
                 for (std::uint64_t seq = tail;
                      seq < head;
@@ -758,6 +835,18 @@ int main(int argc, char **argv) {
                             viewer->freq_push(
                                 x, y, t, r.id);
                         }
+
+                        ++center_counter;
+
+                        if ((center_counter %
+                             options.center_stride) == 0u)
+                        {
+                            center_worker.push(
+                                x,
+                                y,
+                                t,
+                                r.id);
+                        }
                     }
 
                     newest_filtered_ts.store(
@@ -767,6 +856,8 @@ int main(int argc, char **argv) {
 
                 if (viewer)
                     viewer->freq_end_batch();
+
+                center_worker.end_batch();
 
                 filter_input.consumer_commit(head);
             }
@@ -866,14 +957,14 @@ int main(int argc, char **argv) {
 
         if (viewer) {
             std::cout
-                << "Parallel transition-ring filter running.\n"
+                << "Parallel transition-ring filter + center worker running.\n"
                 << "Q/Esc closes viewer.\n";
 
             viewer->run();
         }
         else {
             std::cout
-                << "Parallel transition-ring filter running.\n"
+                << "Parallel transition-ring filter + center worker running.\n"
                 << "Press ENTER to stop.\n";
 
             std::cin.get();
@@ -886,6 +977,8 @@ int main(int argc, char **argv) {
             std::memory_order_release);
 
         filter_thread.join();
+
+        center_worker.stop();
 
         const std::uint32_t cam_t =
             newest_camera_ts.load();
@@ -921,6 +1014,18 @@ int main(int argc, char **argv) {
                 << freq_counts[i].load()
                 << "\n";
         }
+
+        std::cout
+            << "\nCenter worker\n"
+            << "  submitted : "
+            << center_worker.submitted()
+            << "\n"
+            << "  input drops: "
+            << center_worker.input_drops()
+            << "\n"
+            << "  window drops: "
+            << center_worker.window_drops()
+            << "\n";
 
         return 0;
     }
