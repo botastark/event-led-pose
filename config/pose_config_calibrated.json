@@ -1,0 +1,60 @@
+{
+  "NOTE": "Camera calibration from calibration_best.yml. LED geometry supplied by user. Marker convention: +X right, +Y up, Z=0 plane. Pose estimator recenters these points internally so tvec is the triangle centroid pose.",
+  "camera": {
+    "width": 1280,
+    "height": 720,
+    "fx": 888.8236047917211,
+    "fy": 888.9714064688704,
+    "cx": 629.2003714367852,
+    "cy": 359.9733906980617,
+    "dist": [
+      -0.39707420398584425,
+      0.21279219168754618,
+      0.00048228127221348877,
+      -0.0004727752879749188,
+      -0.0664426167539844
+    ]
+  },
+  "led_points_mm": {
+    "165": [
+      -8.0,
+      -2.5,
+      0.0
+    ],
+    "366": [
+      8.0,
+      -3.0,
+      0.0
+    ],
+    "596": [
+      0.0,
+      -7.5,
+      0.0
+    ]
+  },
+  "quality": {
+    "min_samples": 8,
+    "max_p95_radius_px": 80.0,
+    "max_reprojection_rms_px": 5.0
+  },
+  "angle_limits_deg": {
+    "roll": [
+      -60.0,
+      60.0
+    ],
+    "pitch": [
+      -60.0,
+      60.0
+    ],
+    "yaw": [
+      -180.0,
+      180.0
+    ]
+  },
+  "continuity": {
+    "max_translation_jump_mm": 250.0,
+    "max_rotation_jump_deg": 45.0,
+    "translation_cost_per_mm": 0.01,
+    "rotation_cost_per_deg": 0.05
+  }
+}

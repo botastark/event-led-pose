@@ -2,6 +2,7 @@
 #include "center_worker.hpp"
 #include "packed_event.hpp"
 #include "spsc_ring.hpp"
+#include "pose_estimator.hpp"
 
 #include <metavision/sdk/base/events/event_cd.h>
 #include <metavision/sdk/stream/camera.h>
@@ -21,6 +22,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <utility>
 
 namespace {
 
@@ -633,6 +635,9 @@ struct Options {
     std::string bias_config_path;
 
     bool print_biases = false;
+
+    // Optional calibrated P3P pose estimation.
+    std::string pose_config_path;
 };
 
 Options parse_args(int argc, char **argv) {
@@ -729,6 +734,12 @@ Options parse_args(int argc, char **argv) {
         else if (a == "--print-biases") {
             o.print_biases = true;
         }
+        else if (a == "--pose-config") {
+            if (++i >= argc)
+                throw std::runtime_error("--pose-config needs path");
+
+            o.pose_config_path = argv[i];
+        }
         else if (a == "--help" || a == "-h") {
             std::cout
                 << "Usage: live_frequency_center [options]\n"
@@ -745,7 +756,8 @@ Options parse_args(int argc, char **argv) {
                 << "  --hist-max-radius PX\n"
                 << "  --no-histograms\n"
                 << "  --bias-config FILE.json\n"
-                << "  --print-biases\n";
+                << "  --print-biases\n"
+                << "  --pose-config FILE.json\n";
 
             std::exit(0);
         }
@@ -893,10 +905,31 @@ int main(int argc, char **argv) {
     using event_led_pose::SpscRing;
     using event_led_pose::CenterStore;
     using event_led_pose::CenterWorker;
+    using event_led_pose::CenterSnapshot;
+    using event_led_pose::PoseConfig;
+    using event_led_pose::PoseEstimator;
+    using event_led_pose::PoseResult;
+    using event_led_pose::load_pose_config;
 
     try {
         const Options options =
             parse_args(argc, argv);
+
+        std::unique_ptr<PoseEstimator> pose_estimator;
+
+        if (!options.pose_config_path.empty()) {
+            PoseConfig pose_cfg =
+                load_pose_config(options.pose_config_path);
+
+            pose_estimator =
+                std::make_unique<PoseEstimator>(
+                    std::move(pose_cfg));
+
+            std::cout
+                << "Loaded pose config: "
+                << options.pose_config_path
+                << "\n";
+        }
 
         Camera camera =
             Camera::from_first_available();
@@ -1017,6 +1050,71 @@ int main(int argc, char **argv) {
         }
 
         std::atomic<bool> stop{false};
+
+        // ----------------------------------------------------
+        // LIVE P3P POSE THREAD
+        // ----------------------------------------------------
+        // Reads only the latest CenterSnapshot. It never blocks the
+        // event filter or the center/statistics worker.
+        std::thread pose_thread;
+
+        if (pose_estimator) {
+            pose_thread = std::thread([&] {
+                std::uint64_t center_version = 0;
+                CenterSnapshot snapshot;
+
+                auto last_print =
+                    std::chrono::steady_clock::now();
+
+                while (!stop.load(
+                    std::memory_order_acquire))
+                {
+                    if (!center_store.copy_if_new(
+                            center_version,
+                            snapshot))
+                    {
+                        std::this_thread::sleep_for(
+                            std::chrono::milliseconds(1));
+                        continue;
+                    }
+
+                    const PoseResult pose =
+                        pose_estimator->estimate(snapshot);
+
+                    if (!pose.valid)
+                        continue;
+
+                    const auto now =
+                        std::chrono::steady_clock::now();
+
+                    if (now - last_print <
+                        std::chrono::milliseconds(100))
+                    {
+                        continue;
+                    }
+
+                    last_print = now;
+
+                    std::cout
+                        << "POSE centroid_cam_mm=("
+                        << pose.position_mm[0] << ", "
+                        << pose.position_mm[1] << ", "
+                        << pose.position_mm[2] << ")"
+                        << " rpy_deg=("
+                        << pose.rpy_deg[0] << ", "
+                        << pose.rpy_deg[1] << ", "
+                        << pose.rpy_deg[2] << ")"
+                        << " reproj="
+                        << pose.reprojection_rms_px
+                        << "px"
+                        << " candidates="
+                        << pose.accepted_candidate_count
+                        << "/"
+                        << pose.candidate_count
+                        << "\n";
+                }
+            });
+        }
 
         std::atomic<std::uint32_t>
             newest_camera_ts{0};
@@ -1274,6 +1372,9 @@ int main(int argc, char **argv) {
             std::memory_order_release);
 
         filter_thread.join();
+
+        if (pose_thread.joinable())
+            pose_thread.join();
 
         center_worker.stop();
 

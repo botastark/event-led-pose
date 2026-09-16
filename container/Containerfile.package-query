@@ -6,13 +6,18 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
-        software-properties-common
-
-RUN curl --fail --show-error --silent --location \
+        software-properties-common \
+    && curl --fail --show-error --silent --location \
         https://propheseeai.jfrog.io/artifactory/api/security/keypair/prophesee-gpg/public \
         --output /etc/apt/trusted.gpg.d/prophesee.asc \
     && add-apt-repository --yes \
         'https://propheseeai.jfrog.io/artifactory/openeb-debian/' \
     && apt-get update
 
-CMD ["bash", "-lc", "apt-cache policy metavision-openeb && apt-cache madison metavision-openeb"]
+CMD ["bash", "-lc", \
+     "echo '=== OpenEB ==='; \
+      apt-cache policy metavision-openeb; \
+      apt-cache madison metavision-openeb; \
+      echo; \
+      echo '=== OpenCV C++ ==='; \
+      apt-cache policy libopencv-dev"]

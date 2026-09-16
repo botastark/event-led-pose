@@ -1,0 +1,36 @@
+{
+  "NOTE": "REPLACE camera intrinsics and physical LED coordinates before running pose estimation",
+
+  "camera": {
+    "fx": 0.0,
+    "fy": 0.0,
+    "cx": 640.0,
+    "cy": 360.0,
+    "dist": [0.0, 0.0, 0.0, 0.0, 0.0]
+  },
+
+  "led_points_mm": {
+    "165": [0.0, 0.0, 0.0],
+    "366": [0.0, 0.0, 0.0],
+    "596": [0.0, 0.0, 0.0]
+  },
+
+  "quality": {
+    "min_samples": 8,
+    "max_p95_radius_px": 80.0,
+    "max_reprojection_rms_px": 5.0
+  },
+
+  "angle_limits_deg": {
+    "roll":  [-60.0, 60.0],
+    "pitch": [-60.0, 60.0],
+    "yaw":   [-180.0, 180.0]
+  },
+
+  "continuity": {
+    "max_translation_jump_mm": 250.0,
+    "max_rotation_jump_deg": 45.0,
+    "translation_cost_per_mm": 0.01,
+    "rotation_cost_per_deg": 0.05
+  }
+}

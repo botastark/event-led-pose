@@ -16,6 +16,10 @@ find_package(OpenGL REQUIRED)
 find_package(GLEW REQUIRED)
 find_package(glfw3 REQUIRED)
 find_package(Threads REQUIRED)
+find_package(OpenCV REQUIRED COMPONENTS
+    core
+    calib3d
+)
 
 add_library(
     center_worker
@@ -69,6 +73,21 @@ target_compile_options(
     -march=native
 )
 
+add_library(pose_estimator
+    src/pose_estimator.cpp
+)
+
+target_include_directories(pose_estimator
+    PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${OpenCV_INCLUDE_DIRS}
+)
+
+target_link_libraries(pose_estimator
+    PUBLIC
+        ${OpenCV_LIBS}
+)
+
 add_executable(
     live_frequency_center
     src/live_frequency_center.cpp
@@ -87,7 +106,7 @@ target_link_libraries(
     MetavisionSDK::stream
     fast_event_viewer
     center_worker
-    Threads::Threads
+    pose_estimator
 )
 
 target_compile_options(
