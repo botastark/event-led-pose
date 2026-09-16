@@ -1,430 +1,935 @@
-#include <metavision/sdk/stream/camera.h>
-#include <metavision/sdk/base/events/event_cd.h>
+#include "fast_event_viewer.hpp"
+#include "packed_event.hpp"
+#include "spsc_ring.hpp"
 
-#include <opencv2/highgui.hpp>
-#include <opencv2/imgproc.hpp>
+#include <metavision/sdk/base/events/event_cd.h>
+#include <metavision/sdk/stream/camera.h>
 
 #include <array>
 #include <atomic>
-#include <cmath>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
-#include <cstring>
 #include <iostream>
-#include <limits>
-#include <mutex>
+#include <memory>
+#include <stdexcept>
 #include <string>
 #include <thread>
-#include <chrono>
 #include <vector>
 
-// ============================================================
-// FILTER PARAMETERS TO TUNE
-// ============================================================
+namespace {
 
-constexpr std::array<double, 3> LED_FREQ_HZ = {
-    165.0,
-    366.0,
-    596.0
+using event_led_pose::PackedEvent;
+using event_led_pose::pack_event;
+using event_led_pose::event_x;
+using event_led_pose::event_y;
+using event_led_pose::event_p;
+
+// ============================================================
+// TARGET FREQUENCIES
+// ============================================================
+//
+// Positive event  = OFF -> ON transition
+// Negative event  = ON  -> OFF transition
+//
+// Same transition type repeats every full LED period T:
+//
+// OFF->ON ... OFF->ON   ~= n*T
+// ON ->OFF ... ON ->OFF ~= n*T
+//
+// Opposite transition types should be separated by:
+//
+// OFF->ON ... ON->OFF ~= (n + 0.5)*T
+//
+// We use same-type full-period evidence as the primary classifier.
+// Opposite-type half-period evidence is optional confirmation.
+//
+
+struct FrequencyConfig {
+    std::uint16_t period_us;
+    std::array<std::uint16_t, 4> expected;
+    std::array<std::uint16_t, 4> tolerance;
+    const char *name;
 };
 
-constexpr std::size_t HISTORY_SIZE = 4;
-constexpr int MAX_SAME_POLARITY_MULTIPLE = 3;
-constexpr int MAX_CROSS_POLARITY_HALF_MULTIPLE = 5;
-constexpr double PERIOD_TOLERANCE = 0.03;
-constexpr int SAME_POLARITY_WEIGHT = 2;
-constexpr int CROSS_POLARITY_WEIGHT = 1;
-constexpr int MIN_SCORE = 4;
-constexpr bool PRINT_ACCEPTED_EVENTS = false;
+// ~ +/-4% windows. Missed cycles allowed up to 4T.
+constexpr std::array<FrequencyConfig, 3> FREQ = {{
+    {6061, {6061,12122,18183,24244}, {242,485,727,970}, "165 Hz"},
+    {2732, {2732, 5464, 8196,10928}, {109,219,328,437}, "366 Hz"},
+    {1678, {1678, 3356, 5034, 6712}, { 67,134,201,268}, "596 Hz"}
+}};
+
+constexpr std::uint8_t NO_CANDIDATE = 0xFF;
+
+// Same-polarity burst suppression.
+constexpr std::uint32_t BURST_MERGE_US = 120;
+
+// Intervals larger than this cannot be represented by uint16_t.
+// Our largest useful interval is 4T_165 ~= 24.2 ms, so uint16_t
+// is more than enough and saves memory.
+constexpr std::uint32_t MAX_STORED_DT_US = 30000;
+
+// Candidate timing.
+constexpr std::uint32_t CANDIDATE_TIMEOUT_US = 40000;
+
+// Opposite-transition half-period tolerance.
+constexpr std::uint32_t CROSS_TOLERANCE_PERMILLE = 80; // 8%
+
+// Robustness thresholds:
+//
+// Strong case:
+//   at least one valid OFF->ON full-period interval AND
+//   at least one valid ON->OFF full-period interval.
+//
+// Fallback case:
+//   3 valid full-period intervals from one transition direction
+//   when the other polarity is weak/missing.
+//
+constexpr int MIN_BOTH_EDGE_MATCHES = 2;
+constexpr int MIN_SINGLE_EDGE_MATCHES = 3;
+
 
 // ============================================================
-// DISPLAY DEFAULTS
+// TINY PER-POLARITY INTERVAL RING
 // ============================================================
+//
+// Two full-period observations per transition direction.
+// Combined pixel history:
+//   2 x OFF->ON periods
+//   2 x ON->OFF periods
+//
+// Stored as uint16_t because all relevant dt are < 30 ms.
+//
+// This is much smaller than storing 4-6 absolute uint32 timestamps
+// per polarity.
+//
 
-constexpr int DEFAULT_DISPLAY_FPS = 60;
-constexpr int DEFAULT_POINT_RADIUS = 1;
+struct IntervalRing2 {
+    std::uint16_t dt0 = 0;
+    std::uint16_t dt1 = 0;
 
-struct RuntimeOptions {
-    bool visualize = false;
-    int display_fps = DEFAULT_DISPLAY_FPS;
-    int point_radius = DEFAULT_POINT_RADIUS;
-};
-
-static RuntimeOptions parse_options(int argc, char **argv) {
-    RuntimeOptions opt;
-
-    for (int i = 1; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--visualize") == 0) {
-            opt.visualize = true;
-        } else if (std::strcmp(argv[i], "--display-fps") == 0 && i + 1 < argc) {
-            opt.display_fps = std::max(1, std::atoi(argv[++i]));
-        } else if (std::strcmp(argv[i], "--point-radius") == 0 && i + 1 < argc) {
-            opt.point_radius = std::max(0, std::atoi(argv[++i]));
-        } else if (std::strcmp(argv[i], "--help") == 0) {
-            std::cout
-                << "Usage: live_frequency_ring [options]\n"
-                << "  --visualize           Show accepted events in real time\n"
-                << "  --display-fps N       Display refresh rate (default 60)\n"
-                << "  --point-radius N      Accepted-event radius (default 1)\n";
-            std::exit(0);
-        }
+    // newest first; with N=2 a shift is cheaper than maintaining
+    // a separate ring index.
+    inline void push(std::uint16_t dt) noexcept {
+        dt1 = dt0;
+        dt0 = dt;
     }
 
-    return opt;
-}
-
-// ============================================================
-// CIRCULAR TIMESTAMP BUFFER
-// ============================================================
-
-template <std::size_t N>
-struct TimestampRing {
-    std::array<uint32_t, N> ts{};
-    uint8_t head = 0;
-    uint8_t count = 0;
-
-    inline void push(uint32_t t) {
-        ts[head] = t;
-        ++head;
-        if (head == N) {
-            head = 0;
-        }
-        if (count < N) {
-            ++count;
-        }
-    }
-
-    inline uint32_t get(std::size_t age) const {
-        int index = static_cast<int>(head) - 1 - static_cast<int>(age);
-        while (index < 0) {
-            index += static_cast<int>(N);
-        }
-        return ts[static_cast<std::size_t>(index)];
+    inline int count_nonzero() const noexcept {
+        return (dt0 != 0) + (dt1 != 0);
     }
 };
+
+
+// ============================================================
+// PER-PIXEL STATE
+// ============================================================
+//
+// 20 bytes/pixel on normal 4-byte alignment:
+//
+//   last OFF->ON timestamp             4
+//   last ON->OFF timestamp             4
+//   2 OFF->ON period intervals         4
+//   2 ON->OFF period intervals         4
+//   candidate/confidence/flags         4
+//
+// At 1280x720 this is ~17.6 MiB.
+//
+// Compare that with two 6-timestamp uint32 histories:
+//   12 timestamps * 4 bytes ~= 48 bytes/pixel before metadata.
+//
 
 struct PixelState {
-    TimestampRing<HISTORY_SIZE> pos;
-    TimestampRing<HISTORY_SIZE> neg;
+    std::uint32_t last_rise = 0; // OFF -> ON (positive)
+    std::uint32_t last_fall = 0; // ON  -> OFF (negative)
+
+    IntervalRing2 rise_periods;
+    IntervalRing2 fall_periods;
+
+    std::uint8_t candidate = NO_CANDIDATE;
+    std::uint8_t confidence = 0;
+
+    // bit 0: candidate has rise support
+    // bit 1: candidate has fall support
+    std::uint8_t support_mask = 0;
+
+    std::uint8_t pad = 0;
 };
 
-struct FilterResult {
+static_assert(sizeof(PixelState) == 20,
+              "PixelState size changed; memory budget affected");
+
+struct Result {
     bool passed = false;
-    int frequency_id = -1;
-    int same_matches = 0;
-    int cross_matches = 0;
-    int score = 0;
-    double mean_error = std::numeric_limits<double>::infinity();
+    std::uint8_t id = NO_CANDIDATE;
 };
 
-inline double period_us(double frequency_hz) {
-    return 1e6 / frequency_hz;
-}
 
-inline bool same_polarity_match(uint32_t dt,
-                                double frequency_hz,
-                                double &relative_error) {
-    const double T = period_us(frequency_hz);
-    bool matched = false;
-    double best = std::numeric_limits<double>::infinity();
+// ============================================================
+// INTEGER MATCHING
+// ============================================================
 
-    for (int multiple = 1; multiple <= MAX_SAME_POLARITY_MULTIPLE; ++multiple) {
-        const double expected = T * static_cast<double>(multiple);
-        const double err = std::abs(static_cast<double>(dt) - expected) / expected;
+inline bool match_same_transition_period(
+    std::uint32_t dt,
+    const FrequencyConfig &f) noexcept
+{
+    // Compiler can unroll this fixed loop.
+    for (int i = 0; i < 4; ++i) {
+        const std::uint32_t e =
+            f.expected[static_cast<std::size_t>(i)];
 
-        if (err <= PERIOD_TOLERANCE && err < best) {
-            best = err;
-            matched = true;
-        }
+        const std::uint32_t tol =
+            f.tolerance[static_cast<std::size_t>(i)];
+
+        if (dt >= e - tol && dt <= e + tol)
+            return true;
     }
 
-    relative_error = best;
-    return matched;
+    return false;
 }
 
-inline bool cross_polarity_match(uint32_t dt,
-                                 double frequency_hz,
-                                 double &relative_error) {
-    const double T = period_us(frequency_hz);
-    bool matched = false;
-    double best = std::numeric_limits<double>::infinity();
 
-    for (int odd = 1; odd <= MAX_CROSS_POLARITY_HALF_MULTIPLE; odd += 2) {
-        const double expected = 0.5 * T * static_cast<double>(odd);
-        const double err = std::abs(static_cast<double>(dt) - expected) / expected;
+// Cheap acquisition gate.
+// Returns the best frequency whose n*T window contains dt.
+inline std::uint8_t classify_interval(
+    std::uint32_t dt) noexcept
+{
+    std::uint8_t best = NO_CANDIDATE;
 
-        if (err <= PERIOD_TOLERANCE && err < best) {
-            best = err;
-            matched = true;
-        }
-    }
+    std::uint32_t best_error = 0xFFFFFFFFu;
+    std::uint32_t best_expected = 1;
 
-    relative_error = best;
-    return matched;
-}
+    for (std::uint8_t i = 0; i < 3; ++i) {
+        const auto &f = FREQ[i];
 
-template <std::size_t N>
-inline FilterResult classify_event(const TimestampRing<N> &same_history,
-                                   const TimestampRing<N> &opposite_history,
-                                   uint32_t now) {
-    FilterResult best;
+        for (int k = 0; k < 4; ++k) {
+            const std::uint32_t e =
+                f.expected[static_cast<std::size_t>(k)];
 
-    for (std::size_t f = 0; f < LED_FREQ_HZ.size(); ++f) {
-        int same_matches = 0;
-        int cross_matches = 0;
-        double total_error = 0.0;
-        int error_count = 0;
+            const std::uint32_t tol =
+                f.tolerance[static_cast<std::size_t>(k)];
 
-        for (std::size_t age = 0; age < same_history.count; ++age) {
-            const uint32_t dt = now - same_history.get(age);
-            double error = 0.0;
+            if (dt < e - tol || dt > e + tol)
+                continue;
 
-            if (same_polarity_match(dt, LED_FREQ_HZ[f], error)) {
-                ++same_matches;
-                total_error += error;
-                ++error_count;
+            const std::uint32_t err =
+                dt > e ? dt - e : e - dt;
+
+            // Compare relative error without floating point.
+            if (best == NO_CANDIDATE ||
+                static_cast<std::uint64_t>(err) * best_expected <
+                static_cast<std::uint64_t>(best_error) * e)
+            {
+                best = i;
+                best_error = err;
+                best_expected = e;
             }
-        }
-
-        for (std::size_t age = 0; age < opposite_history.count; ++age) {
-            const uint32_t dt = now - opposite_history.get(age);
-            double error = 0.0;
-
-            if (cross_polarity_match(dt, LED_FREQ_HZ[f], error)) {
-                ++cross_matches;
-                total_error += error;
-                ++error_count;
-            }
-        }
-
-        const int score = SAME_POLARITY_WEIGHT * same_matches
-                        + CROSS_POLARITY_WEIGHT * cross_matches;
-
-        if (score < MIN_SCORE || error_count == 0) {
-            continue;
-        }
-
-        const double mean_error = total_error / static_cast<double>(error_count);
-
-        if (!best.passed || score > best.score ||
-            (score == best.score && mean_error < best.mean_error)) {
-            best.passed = true;
-            best.frequency_id = static_cast<int>(f);
-            best.same_matches = same_matches;
-            best.cross_matches = cross_matches;
-            best.score = score;
-            best.mean_error = mean_error;
         }
     }
 
     return best;
 }
 
+
+// Opposite transition phase:
+//
+//   2*dt ~= odd*T
+//
+// because dt ~= 0.5T, 1.5T, 2.5T, ...
+inline bool match_cross_transition_phase(
+    std::uint32_t dt,
+    std::uint16_t period) noexcept
+{
+    const std::uint64_t twice =
+        2ull * static_cast<std::uint64_t>(dt);
+
+    static constexpr std::array<std::uint32_t, 8> ODD = {
+        1,3,5,7,9,11,13,15
+    };
+
+    for (const std::uint32_t n : ODD) {
+        const std::uint64_t expected =
+            static_cast<std::uint64_t>(n) * period;
+
+        const std::uint64_t error =
+            twice > expected
+                ? twice - expected
+                : expected - twice;
+
+        if (error * 1000ull <=
+            expected * CROSS_TOLERANCE_PERMILLE)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+
+inline int ring_matches(const IntervalRing2 &ring,
+                        const FrequencyConfig &f) noexcept {
+    int matches = 0;
+
+    if (ring.dt0 != 0 &&
+        match_same_transition_period(ring.dt0, f))
+        ++matches;
+
+    if (ring.dt1 != 0 &&
+        match_same_transition_period(ring.dt1, f))
+        ++matches;
+
+    return matches;
+}
+
+
+// Score a frequency using BOTH transition directions.
+//
+// Primary evidence:
+//   OFF->ON -> OFF->ON = nT
+//   ON->OFF -> ON->OFF = nT
+//
+// Strong lock:
+//   at least one matching interval from both transition directions.
+//
+// Fallback:
+//   three total matches if one polarity is not reliable.
+//
+// Cross-phase can confirm but is not mandatory.
+inline int score_frequency(const PixelState &s,
+                           std::uint8_t id,
+                           std::uint32_t now,
+                           bool current_polarity) noexcept {
+    const auto &f = FREQ[id];
+
+    const int rise =
+        ring_matches(s.rise_periods, f);
+
+    const int fall =
+        ring_matches(s.fall_periods, f);
+
+    int score = rise + fall;
+
+    if (rise > 0 && fall > 0)
+        score += 2; // explicit both-edge bonus
+
+    // Optional cross-transition phase confirmation using newest
+    // rise/fall absolute timestamps.
+    if (s.last_rise != 0 && s.last_fall != 0) {
+        const std::uint32_t dt =
+            s.last_rise > s.last_fall
+                ? s.last_rise - s.last_fall
+                : s.last_fall - s.last_rise;
+
+        if (match_cross_transition_phase(dt, f.period_us))
+            ++score;
+    }
+
+    (void)now;
+    (void)current_polarity;
+
+    return score;
+}
+
+
 // ============================================================
-// MAIN
+// TRANSITION-RING FILTER
 // ============================================================
+
+inline Result process_event(PixelState &s,
+                            bool polarity,
+                            std::uint32_t now) noexcept {
+    Result out;
+
+    // Positive polarity = OFF -> ON (rise)
+    // Negative polarity = ON  -> OFF (fall)
+    std::uint32_t &last_same =
+        polarity ? s.last_rise : s.last_fall;
+
+    IntervalRing2 &period_ring =
+        polarity ? s.rise_periods : s.fall_periods;
+
+    const std::uint8_t support_bit =
+        polarity ? 0x01 : 0x02;
+
+    // --------------------------------------------------------
+    // 1. BURST SUPPRESSION
+    // --------------------------------------------------------
+
+    if (last_same != 0) {
+        const std::uint32_t dt =
+            now - last_same;
+
+        if (dt < BURST_MERGE_US)
+            return out;
+    }
+
+    // --------------------------------------------------------
+    // 2. SAME-TRANSITION PERIOD
+    // --------------------------------------------------------
+
+    const std::uint32_t previous_same =
+        last_same;
+
+    last_same = now;
+
+    if (previous_same == 0)
+        return out;
+
+    const std::uint32_t dt =
+        now - previous_same;
+
+    if (dt > MAX_STORED_DT_US)
+        return out;
+
+    // First use the active candidate if there is one.
+    // This is the fast steady-state path.
+    if (s.candidate != NO_CANDIDATE) {
+        const auto &f =
+            FREQ[s.candidate];
+
+        if (match_same_transition_period(dt, f)) {
+            period_ring.push(
+                static_cast<std::uint16_t>(dt));
+
+            s.support_mask |= support_bit;
+
+            const int score =
+                score_frequency(
+                    s,
+                    s.candidate,
+                    now,
+                    polarity);
+
+            // Confidence is only a small hysteresis variable.
+            if (score >= 4) {
+                if (s.confidence < 255)
+                    ++s.confidence;
+            } else if (s.confidence > 0) {
+                --s.confidence;
+            }
+
+            const int rise =
+                ring_matches(
+                    s.rise_periods,
+                    f);
+
+            const int fall =
+                ring_matches(
+                    s.fall_periods,
+                    f);
+
+            const int total =
+                rise + fall;
+
+            const bool both_edges =
+                rise > 0 && fall > 0;
+
+            const bool robust =
+                (both_edges &&
+                 total >= MIN_BOTH_EDGE_MATCHES)
+                ||
+                (total >= MIN_SINGLE_EDGE_MATCHES);
+
+            if (robust) {
+                out.passed = true;
+                out.id = s.candidate;
+            }
+
+            return out;
+        }
+
+        // Candidate did not match this same-transition interval.
+        // Do NOT store arbitrary background dt in the ring.
+        //
+        // Try to see whether the new dt points strongly to a
+        // different known frequency.
+        const std::uint8_t other =
+            classify_interval(dt);
+
+        if (other != NO_CANDIDATE &&
+            other != s.candidate)
+        {
+            s.candidate = other;
+            s.confidence = 1;
+            s.support_mask = support_bit;
+
+            // Reset old interval evidence because it belonged to
+            // the previous candidate.
+            s.rise_periods = {};
+            s.fall_periods = {};
+
+            period_ring.push(
+                static_cast<std::uint16_t>(dt));
+        }
+
+        return out;
+    }
+
+    // --------------------------------------------------------
+    // 3. ACQUISITION
+    // --------------------------------------------------------
+    //
+    // No candidate:
+    // use one same-transition interval to find a plausible known
+    // frequency. Random unmatched intervals are NOT stored.
+    //
+
+    const std::uint8_t id =
+        classify_interval(dt);
+
+    if (id == NO_CANDIDATE)
+        return out;
+
+    s.candidate = id;
+    s.confidence = 1;
+    s.support_mask = support_bit;
+
+    s.rise_periods = {};
+    s.fall_periods = {};
+
+    period_ring.push(
+        static_cast<std::uint16_t>(dt));
+
+    return out;
+}
+
+
+// ============================================================
+// CLI / PARALLEL PIPELINE
+// ============================================================
+
+struct Options {
+    bool visualize = false;
+    bool show_raw = false;
+
+    unsigned display_fps = 120;
+    std::uint32_t persistence_us = 6000;
+
+    // freshness bound for worker input
+    std::uint64_t max_filter_backlog_events = 100000;
+
+    std::size_t filter_ring_capacity = 1u << 19;
+};
+
+Options parse_args(int argc, char **argv) {
+    Options o;
+
+    for (int i = 1; i < argc; ++i) {
+        const std::string a = argv[i];
+
+        if (a == "--visualize") {
+            o.visualize = true;
+        }
+        else if (a == "--show-raw") {
+            o.show_raw = true;
+        }
+        else if (a == "--display-fps") {
+            if (++i >= argc)
+                throw std::runtime_error("--display-fps needs value");
+
+            o.display_fps =
+                static_cast<unsigned>(
+                    std::stoul(argv[i]));
+        }
+        else if (a == "--persistence-us") {
+            if (++i >= argc)
+                throw std::runtime_error("--persistence-us needs value");
+
+            o.persistence_us =
+                static_cast<std::uint32_t>(
+                    std::stoul(argv[i]));
+        }
+        else if (a == "--max-filter-backlog") {
+            if (++i >= argc)
+                throw std::runtime_error("--max-filter-backlog needs value");
+
+            o.max_filter_backlog_events =
+                std::stoull(argv[i]);
+        }
+        else if (a == "--help" || a == "-h") {
+            std::cout
+                << "Usage: live_frequency_transition_ring [options]\n"
+                << "  --visualize\n"
+                << "  --show-raw\n"
+                << "  --display-fps N\n"
+                << "  --persistence-us N\n"
+                << "  --max-filter-backlog N\n";
+
+            std::exit(0);
+        }
+        else {
+            throw std::runtime_error(
+                "Unknown argument: " + a);
+        }
+    }
+
+    return o;
+}
+
+} // namespace
+
 
 int main(int argc, char **argv) {
     using namespace Metavision;
-
-    const RuntimeOptions options = parse_options(argc, argv);
-
-    Camera camera;
+    using event_led_pose::FastEventViewer;
+    using event_led_pose::SpscRing;
 
     try {
-        camera = Camera::from_first_available();
-    } catch (const std::exception &e) {
-        std::cerr << "Failed to open Prophesee EVK4: " << e.what() << '\n';
-        return 1;
-    }
+        const Options options =
+            parse_args(argc, argv);
 
-    const auto &geometry = camera.geometry();
-    const int width = geometry.get_width();
-    const int height = geometry.get_height();
+        Camera camera =
+            Camera::from_first_available();
 
-    std::cout << "Camera: " << width << " x " << height << '\n';
-    std::cout << "History per polarity: " << HISTORY_SIZE << '\n';
-    std::cout << "Tolerance: +/-" << PERIOD_TOLERANCE * 100.0 << "%\n";
-    std::cout << "Minimum score: " << MIN_SCORE << '\n';
-    std::cout << "Visualization: " << (options.visualize ? "ON" : "OFF") << '\n';
-    if (options.visualize) {
-        std::cout << "Display FPS: " << options.display_fps << '\n';
-    }
+        const auto &geometry =
+            camera.geometry();
 
-    std::cout << "\nTarget frequencies:\n";
-    for (double f : LED_FREQ_HZ) {
-        std::cout << "  " << f << " Hz -> T = " << period_us(f) << " us\n";
-    }
+        const int width =
+            geometry.get_width();
 
-    std::vector<PixelState> pixels(
-        static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
+        const int height =
+            geometry.get_height();
 
-    std::atomic<uint64_t> total_events{0};
-    std::atomic<uint64_t> passed_events{0};
-    std::array<std::atomic<uint64_t>, LED_FREQ_HZ.size()> frequency_counts{};
+        std::cout
+            << "Camera: "
+            << width << " x " << height
+            << "\n"
+            << "Pixel state: "
+            << sizeof(PixelState)
+            << " bytes/pixel (~"
+            << (
+                sizeof(PixelState)
+                * static_cast<double>(width)
+                * static_cast<double>(height)
+                / (1024.0 * 1024.0)
+               )
+            << " MiB)\n"
+            << "Filter model:\n"
+            << "  OFF->ON to OFF->ON = n*T\n"
+            << "  ON->OFF to ON->OFF = n*T\n"
+            << "  opposite edge phase ~= (n+0.5)*T bonus\n";
 
-    // Visualization buffers. The camera callback never calls OpenCV GUI
-    // functions. It only publishes the newest accumulation to ready_frame.
-    // The main thread owns namedWindow/imshow/waitKey.
-    cv::Mat accumulation;
-    cv::Mat ready_frame;
-    std::mutex display_mutex;
-    std::atomic<bool> frame_ready{false};
-    uint32_t last_publish_ts = 0;
+        // ----------------------------------------------------
+        // TRANSPORT RING:
+        //
+        // producer = camera callback
+        // consumer = frequency worker
+        //
+        // This ring ONLY moves packed events between threads.
+        // It is not the frequency-history ring.
+        // ----------------------------------------------------
 
-    const uint32_t display_period_us =
-        static_cast<uint32_t>(1'000'000 / options.display_fps);
+        SpscRing<PackedEvent>
+            filter_input(
+                options.filter_ring_capacity);
 
-    if (options.visualize) {
-        accumulation = cv::Mat::zeros(height, width, CV_8UC3);
-        ready_frame = cv::Mat::zeros(height, width, CV_8UC3);
-    }
+        std::unique_ptr<FastEventViewer>
+            viewer;
 
-    std::atomic<bool> stop_requested{false};
+        if (options.visualize) {
+            FastEventViewer::Config cfg;
 
-    camera.cd().add_callback(
-        [&](const EventCD *begin, const EventCD *end) {
-            for (const EventCD *ev = begin; ev != end; ++ev) {
-                ++total_events;
+            cfg.sensor_width = width;
+            cfg.sensor_height = height;
+            cfg.max_fps = options.display_fps;
+            cfg.persistence_us = options.persistence_us;
 
-                const std::size_t index =
-                    static_cast<std::size_t>(ev->y) * static_cast<std::size_t>(width) +
-                    static_cast<std::size_t>(ev->x);
+            cfg.title =
+                options.show_raw
+                ? "Raw + transition-frequency overlay"
+                : "Transition-frequency overlay";
 
-                PixelState &pixel = pixels[index];
+            viewer =
+                std::make_unique<
+                    FastEventViewer>(cfg);
+        }
 
-                auto &same_history = ev->p ? pixel.pos : pixel.neg;
-                auto &opposite_history = ev->p ? pixel.neg : pixel.pos;
+        std::atomic<bool> stop{false};
 
-                const uint32_t timestamp = static_cast<uint32_t>(ev->t);
+        std::atomic<std::uint32_t>
+            newest_camera_ts{0};
 
-                const FilterResult result =
-                    classify_event(same_history, opposite_history, timestamp);
+        std::atomic<std::uint32_t>
+            newest_filtered_ts{0};
 
-                // Keep all raw events in their polarity-specific rings.
-                same_history.push(timestamp);
+        std::atomic<std::uint64_t>
+            camera_events{0};
 
-                if (result.passed) {
-                    ++passed_events;
-                    ++frequency_counts[static_cast<std::size_t>(result.frequency_id)];
+        std::atomic<std::uint64_t>
+            filter_input_drops{0};
 
-                    if (options.visualize) {
-                        // BGR colors:
-                        // 165 Hz = green, 366 Hz = yellow, 596 Hz = blue.
-                        static const std::array<cv::Vec3b, 3> COLORS = {
-                            cv::Vec3b(0, 255, 0),
-                            cv::Vec3b(0, 255, 255),
-                            cv::Vec3b(255, 0, 0)
-                        };
+        std::atomic<std::uint64_t>
+            filter_stale_skips{0};
 
-                        if (options.point_radius <= 0) {
-                            accumulation.at<cv::Vec3b>(ev->y, ev->x) =
-                                COLORS[static_cast<std::size_t>(result.frequency_id)];
-                        } else {
-                            cv::circle(
-                                accumulation,
-                                cv::Point(ev->x, ev->y),
-                                options.point_radius,
-                                cv::Scalar(
-                                    COLORS[static_cast<std::size_t>(result.frequency_id)][0],
-                                    COLORS[static_cast<std::size_t>(result.frequency_id)][1],
-                                    COLORS[static_cast<std::size_t>(result.frequency_id)][2]),
-                                cv::FILLED,
-                                cv::LINE_8);
+        std::atomic<std::uint64_t>
+            passed_events{0};
+
+        std::array<
+            std::atomic<std::uint64_t>, 3>
+            freq_counts{};
+
+        // ----------------------------------------------------
+        // FILTER WORKER
+        // ----------------------------------------------------
+
+        std::thread filter_thread([&] {
+            std::vector<PixelState> pixels(
+                static_cast<std::size_t>(width)
+                * static_cast<std::size_t>(height));
+
+            std::uint64_t local_passed = 0;
+            std::array<std::uint64_t, 3>
+                local_counts{};
+
+            std::uint64_t local_stale_skips = 0;
+
+            while (!stop.load(
+                std::memory_order_acquire))
+            {
+                std::uint64_t tail =
+                    filter_input.consumer_tail();
+
+                const std::uint64_t head =
+                    filter_input.consumer_head();
+
+                if (head == tail) {
+                    std::this_thread::sleep_for(
+                        std::chrono::microseconds(50));
+                    continue;
+                }
+
+                std::uint64_t backlog =
+                    head - tail;
+
+                // Freshness over completeness:
+                // never replay seconds of old events.
+                if (backlog >
+                    options.max_filter_backlog_events)
+                {
+                    const std::uint64_t skip =
+                        backlog -
+                        options.max_filter_backlog_events;
+
+                    tail += skip;
+                    local_stale_skips += skip;
+                }
+
+                if (viewer)
+                    viewer->freq_begin_batch();
+
+                for (std::uint64_t seq = tail;
+                     seq < head;
+                     ++seq)
+                {
+                    const PackedEvent &e =
+                        filter_input.consumer_at(seq);
+
+                    const std::uint16_t x =
+                        event_x(e);
+
+                    const std::uint16_t y =
+                        event_y(e);
+
+                    const bool p =
+                        event_p(e);
+
+                    const std::uint32_t t =
+                        e.t;
+
+                    PixelState &state =
+                        pixels[
+                            static_cast<std::size_t>(y)
+                            * static_cast<std::size_t>(width)
+                            + static_cast<std::size_t>(x)
+                        ];
+
+                    const Result r =
+                        process_event(
+                            state,
+                            p,
+                            t);
+
+                    if (r.passed) {
+                        ++local_passed;
+                        ++local_counts[r.id];
+
+                        if (viewer) {
+                            viewer->freq_push(
+                                x, y, t, r.id);
                         }
                     }
 
-                    if constexpr (PRINT_ACCEPTED_EVENTS) {
-                        std::cout << "PASS"
-                                  << " x=" << ev->x
-                                  << " y=" << ev->y
-                                  << " p=" << (ev->p ? '+' : '-')
-                                  << " t=" << ev->t
-                                  << " f=" << LED_FREQ_HZ[result.frequency_id]
-                                  << "Hz"
-                                  << " score=" << result.score
-                                  << " error=" << result.mean_error
-                                  << '\n';
-                    }
+                    newest_filtered_ts.store(
+                        t,
+                        std::memory_order_relaxed);
                 }
 
-                // Publish at most one newest display frame at the requested
-                // camera-time cadence. There is no frame queue: ready_frame
-                // is overwritten with the newest state if the GUI is slower.
-                if (options.visualize &&
-                    (last_publish_ts == 0 ||
-                     timestamp - last_publish_ts >= display_period_us)) {
-                    {
-                        std::lock_guard<std::mutex> lock(display_mutex);
-                        accumulation.copyTo(ready_frame);
-                        frame_ready.store(true, std::memory_order_release);
-                    }
+                if (viewer)
+                    viewer->freq_end_batch();
 
-                    accumulation.setTo(cv::Scalar(0, 0, 0));
-                    last_publish_ts = timestamp;
-                }
+                filter_input.consumer_commit(head);
+            }
+
+            passed_events.store(
+                local_passed,
+                std::memory_order_relaxed);
+
+            filter_stale_skips.store(
+                local_stale_skips,
+                std::memory_order_relaxed);
+
+            for (std::size_t i = 0; i < 3; ++i) {
+                freq_counts[i].store(
+                    local_counts[i],
+                    std::memory_order_relaxed);
             }
         });
 
-    camera.start();
+        // ----------------------------------------------------
+        // CAMERA CALLBACK
+        // ----------------------------------------------------
+        //
+        // No frequency filtering here.
+        // Only pack and publish events.
+        // ----------------------------------------------------
 
-    std::cout << "\nLive frequency filtering running.\n";
-    if (options.visualize) {
-        std::cout << "Press Q or Esc in the window to stop.\n";
+        camera.cd().add_callback(
+            [&](const EventCD *begin,
+                const EventCD *end)
+            {
+                if (begin == end)
+                    return;
 
-        cv::namedWindow("Frequency-filtered events", cv::WINDOW_NORMAL);
-        cv::Mat gui_frame = cv::Mat::zeros(height, width, CV_8UC3);
+                camera_events.fetch_add(
+                    static_cast<std::uint64_t>(
+                        end - begin),
+                    std::memory_order_relaxed);
 
-        while (!stop_requested.load()) {
-            if (frame_ready.exchange(false, std::memory_order_acq_rel)) {
+                filter_input.producer_begin();
+
+                if (viewer &&
+                    options.show_raw)
                 {
-                    std::lock_guard<std::mutex> lock(display_mutex);
-                    ready_frame.copyTo(gui_frame);
+                    viewer->raw_begin_batch();
                 }
-                cv::imshow("Frequency-filtered events", gui_frame);
-            }
 
-            const int key = cv::waitKey(1);
-            if (key == 27 || key == 'q' || key == 'Q') {
-                stop_requested.store(true);
-                break;
-            }
+                std::uint64_t local_drops = 0;
 
-            // Avoid spinning at 100% CPU when there is no new frame.
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                for (const EventCD *ev = begin;
+                     ev != end;
+                     ++ev)
+                {
+                    const PackedEvent pe =
+                        pack_event(
+                            ev->x,
+                            ev->y,
+                            ev->p,
+                            static_cast<
+                                std::uint32_t>(
+                                ev->t));
+
+                    if (!filter_input
+                            .producer_push(pe))
+                    {
+                        ++local_drops;
+                    }
+
+                    if (viewer &&
+                        options.show_raw)
+                    {
+                        viewer->raw_push(pe);
+                    }
+                }
+
+                filter_input.producer_end();
+
+                if (viewer &&
+                    options.show_raw)
+                {
+                    viewer->raw_end_batch();
+                }
+
+                if (local_drops != 0) {
+                    filter_input_drops.fetch_add(
+                        local_drops,
+                        std::memory_order_relaxed);
+                }
+
+                newest_camera_ts.store(
+                    static_cast<std::uint32_t>(
+                        (end - 1)->t),
+                    std::memory_order_relaxed);
+            });
+
+        camera.start();
+
+        if (viewer) {
+            std::cout
+                << "Parallel transition-ring filter running.\n"
+                << "Q/Esc closes viewer.\n";
+
+            viewer->run();
         }
-    } else {
-        std::cout << "Press ENTER to stop.\n";
-        std::cin.get();
+        else {
+            std::cout
+                << "Parallel transition-ring filter running.\n"
+                << "Press ENTER to stop.\n";
+
+            std::cin.get();
+        }
+
+        camera.stop();
+
+        stop.store(
+            true,
+            std::memory_order_release);
+
+        filter_thread.join();
+
+        const std::uint32_t cam_t =
+            newest_camera_ts.load();
+
+        const std::uint32_t fil_t =
+            newest_filtered_ts.load();
+
+        std::cout
+            << "\n============================\n"
+            << "RESULTS\n"
+            << "============================\n"
+            << "Camera events      : "
+            << camera_events.load()
+            << "\n"
+            << "Transport drops    : "
+            << filter_input_drops.load()
+            << "\n"
+            << "Stale filter skips : "
+            << filter_stale_skips.load()
+            << "\n"
+            << "Passed events      : "
+            << passed_events.load()
+            << "\n"
+            << "Final filter lag   : "
+            << (cam_t - fil_t) / 1000.0
+            << " ms\n";
+
+        for (std::size_t i = 0; i < 3; ++i) {
+            std::cout
+                << "  "
+                << FREQ[i].name
+                << " : "
+                << freq_counts[i].load()
+                << "\n";
+        }
+
+        return 0;
     }
+    catch (const std::exception &e) {
+        std::cerr
+            << "Error: "
+            << e.what()
+            << "\n";
 
-    camera.stop();
-
-    if (options.visualize) {
-        cv::destroyAllWindows();
+        return 1;
     }
-
-    const uint64_t total = total_events.load();
-    const uint64_t passed = passed_events.load();
-
-    std::cout << "\n============================\n";
-    std::cout << "RESULTS\n";
-    std::cout << "============================\n";
-    std::cout << "Total events  : " << total << '\n';
-    std::cout << "Passed events : " << passed << '\n';
-
-    if (total > 0) {
-        std::cout << "Pass ratio    : "
-                  << (100.0 * static_cast<double>(passed) /
-                      static_cast<double>(total))
-                  << "%\n";
-    }
-
-    std::cout << "\nAccepted by frequency:\n";
-    for (std::size_t i = 0; i < LED_FREQ_HZ.size(); ++i) {
-        std::cout << "  " << LED_FREQ_HZ[i] << " Hz : "
-                  << frequency_counts[i].load() << '\n';
-    }
-
-    return 0;
 }

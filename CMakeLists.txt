@@ -8,8 +8,38 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(
     MetavisionSDK
-    COMPONENTS core stream ui
+    COMPONENTS core stream
     REQUIRED
+)
+
+find_package(OpenGL REQUIRED)
+find_package(GLEW REQUIRED)
+find_package(glfw3 REQUIRED)
+
+add_library(
+    fast_event_viewer
+    src/fast_event_viewer.cpp
+)
+
+target_include_directories(
+    fast_event_viewer
+    PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(
+    fast_event_viewer
+    PUBLIC
+    OpenGL::GL
+    GLEW::GLEW
+    glfw
+)
+
+target_compile_options(
+    fast_event_viewer
+    PRIVATE
+    -O3
+    -march=native
 )
 
 add_executable(
@@ -22,7 +52,9 @@ target_link_libraries(
     PRIVATE
     MetavisionSDK::core
     MetavisionSDK::stream
-    MetavisionSDK::ui
+    fast_event_viewer
+    Threads::Threads
+
 )
 
 target_compile_options(
@@ -30,16 +62,4 @@ target_compile_options(
     PRIVATE
     -O3
     -march=native
-)
-# additional executable for stream probe
-add_executable(
-    evk4_stream_probe
-    src/evk4_stream_probe.cpp
-)
-
-target_link_libraries(
-    evk4_stream_probe
-    PRIVATE
-    MetavisionSDK::core
-    MetavisionSDK::stream
 )
