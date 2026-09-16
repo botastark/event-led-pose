@@ -32,7 +32,7 @@ run: build
 	./$(BUILD_DIR)/live_frequency_ring
 
 run-vis: build
-	./$(BUILD_DIR)/live_frequency_ring --visualize --display-fps 60
+	./$(BUILD_DIR)/live_frequency_ring --visualize --display-fps 120
 
 probe: build
 	./$(BUILD_DIR)/evk4_stream_probe

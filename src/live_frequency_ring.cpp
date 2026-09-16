@@ -82,11 +82,11 @@ constexpr std::uint32_t CROSS_TOLERANCE_PERMILLE = 80; // 8%
 //   at least one valid ON->OFF full-period interval.
 //
 // Fallback case:
-//   3 valid full-period intervals from one transition direction
+//   2 valid full-period intervals from one transition direction
 //   when the other polarity is weak/missing.
 //
 constexpr int MIN_BOTH_EDGE_MATCHES = 2;
-constexpr int MIN_SINGLE_EDGE_MATCHES = 3;
+constexpr int MIN_SINGLE_EDGE_MATCHES = 2;
 
 
 // ============================================================
