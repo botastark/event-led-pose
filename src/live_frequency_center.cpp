@@ -57,28 +57,43 @@ struct FrequencyConfig {
     const char *name;
 };
 
-// ~ +/-4% windows. Missed cycles allowed up to 4T.
+// ~ +/-2% windows. Missed cycles allowed up to 4T.
 constexpr std::array<FrequencyConfig, 3> FREQ = {{
-    {6061, {6061,12122,18183,24244}, {242,485,727,970}, "165 Hz"},
-    {2732, {2732, 5464, 8196,10928}, {109,219,328,437}, "366 Hz"},
-    {1678, {1678, 3356, 5034, 6712}, { 67,134,201,268}, "596 Hz"}
-}};
 
+    // 165 Hz: ~ +/-1%
+{6061,
+ {6061,12121,0,0},
+ { 61,121,0,0},
+ "165 Hz"},
+
+    // 366 Hz: ~ +/-1.5%
+    {2732,
+     {2732,5464,8197,10929},
+     { 41, 82,123,164},
+     "366 Hz"},
+
+    // 596 Hz: ~ +/-1.5%
+    {1678,
+     {1678,3356,5034,6711},
+     { 25, 50, 76,101},
+     "596 Hz"}
+
+}};
 constexpr std::uint8_t NO_CANDIDATE = 0xFF;
 
 // Same-polarity burst suppression.
-constexpr std::uint32_t BURST_MERGE_US = 3600;
+constexpr std::uint32_t BURST_MERGE_US = 300;
 
 // Intervals larger than this cannot be represented by uint16_t.
 // Our largest useful interval is 4T_165 ~= 24.2 ms, so uint16_t
 // is more than enough and saves memory.
-constexpr std::uint32_t MAX_STORED_DT_US = 30000;
+constexpr std::uint32_t MAX_STORED_DT_US = 25000;
 
 // Candidate timing.
-constexpr std::uint32_t CANDIDATE_TIMEOUT_US = 40000;
+constexpr std::uint32_t CANDIDATE_TIMEOUT_US = 20000;
 
 // Opposite-transition half-period tolerance.
-constexpr std::uint32_t CROSS_TOLERANCE_PERMILLE = 80; // 8%
+constexpr std::uint32_t CROSS_TOLERANCE_PERMILLE = 10; // 1%
 
 // Robustness thresholds:
 //
@@ -89,12 +104,8 @@ constexpr std::uint32_t CROSS_TOLERANCE_PERMILLE = 80; // 8%
 // Fallback case:
 //   2 valid full-period intervals from one transition direction
 //   when the other polarity is weak/missing.
-//
-constexpr int MIN_BOTH_EDGE_MATCHES = 2;
-constexpr int MIN_SINGLE_EDGE_MATCHES = 2;
 
 
-// ============================================================
 // TINY PER-POLARITY INTERVAL RING
 // ============================================================
 //
@@ -151,18 +162,65 @@ struct PixelState {
     IntervalRing2 rise_periods;
     IntervalRing2 fall_periods;
 
+    // Coarse candidate-support timestamp in 256 us ticks.
+    // Keeps PixelState at 20 bytes while making timeout real.
+    std::uint16_t last_support_tick = 0;
+
     std::uint8_t candidate = NO_CANDIDATE;
-    std::uint8_t confidence = 0;
 
     // bit 0: candidate has rise support
     // bit 1: candidate has fall support
     std::uint8_t support_mask = 0;
-
-    std::uint8_t pad = 0;
 };
 
 static_assert(sizeof(PixelState) == 20,
               "PixelState size changed; memory budget affected");
+
+constexpr std::uint32_t CANDIDATE_TICK_SHIFT = 8;
+constexpr std::uint32_t CANDIDATE_TICK_US =
+    1u << CANDIDATE_TICK_SHIFT;
+
+constexpr std::uint16_t CANDIDATE_TIMEOUT_TICKS =
+    static_cast<std::uint16_t>(
+        (CANDIDATE_TIMEOUT_US + CANDIDATE_TICK_US - 1u)
+        / CANDIDATE_TICK_US);
+
+inline std::uint16_t support_tick(
+    std::uint32_t t) noexcept
+{
+    return static_cast<std::uint16_t>(
+        t >> CANDIDATE_TICK_SHIFT);
+}
+
+inline void reset_candidate(
+    PixelState &s) noexcept
+{
+    s.rise_periods = {};
+    s.fall_periods = {};
+    s.last_support_tick = 0;
+    s.candidate = NO_CANDIDATE;
+    s.support_mask = 0;
+}
+
+inline bool candidate_timed_out(
+    const PixelState &s,
+    std::uint32_t now) noexcept
+{
+    if (s.candidate == NO_CANDIDATE ||
+        s.last_support_tick == 0)
+    {
+        return false;
+    }
+
+    const std::uint16_t now_tick =
+        support_tick(now);
+
+    const std::uint16_t age_ticks =
+        static_cast<std::uint16_t>(
+            now_tick - s.last_support_tick);
+
+    return age_ticks > CANDIDATE_TIMEOUT_TICKS;
+}
 
 struct Result {
     bool passed = false;
@@ -182,6 +240,9 @@ inline bool match_same_transition_period(
     for (int i = 0; i < 4; ++i) {
         const std::uint32_t e =
             f.expected[static_cast<std::size_t>(i)];
+
+        if (e == 0)
+            continue;
 
         const std::uint32_t tol =
             f.tolerance[static_cast<std::size_t>(i)];
@@ -210,6 +271,9 @@ inline std::uint8_t classify_interval(
         for (int k = 0; k < 4; ++k) {
             const std::uint32_t e =
                 f.expected[static_cast<std::size_t>(k)];
+
+            if (e == 0)
+                continue;
 
             const std::uint32_t tol =
                 f.tolerance[static_cast<std::size_t>(k)];
@@ -346,6 +410,11 @@ inline Result process_event(PixelState &s,
                             std::uint32_t now) noexcept {
     Result out;
 
+    // Actually enforce candidate timeout before using this event.
+    if (candidate_timed_out(s, now)) {
+        reset_candidate(s);
+    }
+
     // Positive polarity = OFF -> ON (rise)
     // Negative polarity = ON  -> OFF (fall)
     std::uint32_t &last_same =
@@ -399,6 +468,10 @@ inline Result process_event(PixelState &s,
 
             s.support_mask |= support_bit;
 
+            // Refresh lifetime only on genuine matching evidence.
+            s.last_support_tick =
+                support_tick(now);
+
             const int score =
                 score_frequency(
                     s,
@@ -406,13 +479,7 @@ inline Result process_event(PixelState &s,
                     now,
                     polarity);
 
-            // Confidence is only a small hysteresis variable.
-            if (score >= 4) {
-                if (s.confidence < 255)
-                    ++s.confidence;
-            } else if (s.confidence > 0) {
-                --s.confidence;
-            }
+            (void)score;
 
             const int rise =
                 ring_matches(
@@ -431,10 +498,8 @@ inline Result process_event(PixelState &s,
                 rise > 0 && fall > 0;
 
             const bool robust =
-                (both_edges &&
-                 total >= MIN_BOTH_EDGE_MATCHES)
-                ||
-                (total >= MIN_SINGLE_EDGE_MATCHES);
+                rise >= 2 &&
+                fall >= 2;
 
             if (robust) {
                 out.passed = true;
@@ -445,27 +510,41 @@ inline Result process_event(PixelState &s,
         }
 
         // Candidate did not match this same-transition interval.
-        // Do NOT store arbitrary background dt in the ring.
         //
-        // Try to see whether the new dt points strongly to a
-        // different known frequency.
+        // Break temporal coherence for THIS polarity immediately.
+        // This prevents isolated matches separated by arbitrary
+        // background intervals from accumulating in Ring2.
+        period_ring = {};
+        s.support_mask &=
+            static_cast<std::uint8_t>(~support_bit);
+
+        // See whether this interval points to a different known
+        // frequency.
         const std::uint8_t other =
             classify_interval(dt);
 
         if (other != NO_CANDIDATE &&
             other != s.candidate)
         {
-            s.candidate = other;
-            s.confidence = 1;
-            s.support_mask = support_bit;
-
-            // Reset old interval evidence because it belonged to
-            // the previous candidate.
             s.rise_periods = {};
             s.fall_periods = {};
 
+            s.candidate = other;
+            s.support_mask = support_bit;
+            s.last_support_tick =
+                support_tick(now);
+
             period_ring.push(
                 static_cast<std::uint16_t>(dt));
+
+            return out;
+        }
+
+        // If no coherent support remains, release the candidate now.
+        if (s.rise_periods.count_nonzero() == 0 &&
+            s.fall_periods.count_nonzero() == 0)
+        {
+            reset_candidate(s);
         }
 
         return out;
@@ -483,13 +562,13 @@ inline Result process_event(PixelState &s,
     const std::uint8_t id =
         classify_interval(dt);
 
-
     if (id == NO_CANDIDATE)
         return out;
 
     s.candidate = id;
-    s.confidence = 1;
     s.support_mask = support_bit;
+    s.last_support_tick =
+        support_tick(now);
 
     s.rise_periods = {};
     s.fall_periods = {};
@@ -521,14 +600,24 @@ struct Options {
     // Only every Nth classified event is copied to it.
     std::uint32_t center_stride = 4;
 
-    // Sliding event-time window for current center.
-    std::uint32_t center_window_us = 20000;
+    // Sliding event-time window for live center + radial stats.
+    // Shorter windows reduce motion-smear in the measured distribution.
+    std::uint32_t center_window_us = 10000;
 
-    // Center worker update period.
-    std::uint32_t center_update_us = 5000;
+    // Publish live stats at 100 Hz by default.
+    std::uint32_t center_update_us = 10000;
 
     // Hard bound per frequency for close-up/high-rate LEDs.
     std::size_t center_max_samples = 20000;
+
+    // Optional buffered CSV output for offline motion analysis.
+    // Empty = no recording.
+    std::string stats_csv_path;
+
+    // Shared radial histogram X-axis for all three LEDs.
+    float histogram_max_radius_px = 400.0f;
+
+    bool show_histograms = true;
 
     // Custom JSON file with a nested "biases" object.
     // Example:
@@ -612,6 +701,25 @@ Options parse_args(int argc, char **argv) {
             o.center_max_samples =
                 static_cast<std::size_t>(std::stoull(argv[i]));
         }
+        else if (a == "--stats-csv") {
+            if (++i >= argc)
+                throw std::runtime_error("--stats-csv needs path");
+
+            o.stats_csv_path = argv[i];
+        }
+        else if (a == "--hist-max-radius") {
+            if (++i >= argc)
+                throw std::runtime_error("--hist-max-radius needs value");
+
+            o.histogram_max_radius_px =
+                std::stof(argv[i]);
+
+            if (o.histogram_max_radius_px <= 0.0f)
+                throw std::runtime_error("--hist-max-radius must be > 0");
+        }
+        else if (a == "--no-histograms") {
+            o.show_histograms = false;
+        }
         else if (a == "--bias-config") {
             if (++i >= argc)
                 throw std::runtime_error("--bias-config needs path");
@@ -633,6 +741,9 @@ Options parse_args(int argc, char **argv) {
                 << "  --center-window-us N\n"
                 << "  --center-update-us N\n"
                 << "  --center-max-samples N\n"
+                << "  --stats-csv FILE.csv\n"
+                << "  --hist-max-radius PX\n"
+                << "  --no-histograms\n"
                 << "  --bias-config FILE.json\n"
                 << "  --print-biases\n";
 
@@ -854,10 +965,12 @@ int main(int argc, char **argv) {
                 options.filter_ring_capacity);
 
         // ----------------------------------------------------
-        // CLASSIFIED EVENTS -> CENTER WORKER
+        // CLASSIFIED EVENTS -> SPATIAL STATS WORKER
         //
-        // This is a separate lossy path. The frequency worker never
-        // waits for center calculation or visualization.
+        // This is a separate lossy path. The frequency worker only
+        // copies sampled accepted events into an SPSC queue.
+        // Center/radius statistics and CSV writing happen here,
+        // never in the latency-critical filter thread.
         // ----------------------------------------------------
 
         CenterStore center_store;
@@ -867,6 +980,12 @@ int main(int argc, char **argv) {
         center_cfg.update_period_us = options.center_update_us;
         center_cfg.max_samples_per_frequency =
             options.center_max_samples;
+
+        center_cfg.histogram_max_radius_px =
+            options.histogram_max_radius_px;
+
+        center_cfg.csv_path =
+            options.stats_csv_path;
 
         CenterWorker center_worker(
             center_cfg,
@@ -887,8 +1006,8 @@ int main(int argc, char **argv) {
 
             cfg.title =
                 options.show_raw
-                ? "Raw + transition-frequency overlay"
-                : "Transition-frequency overlay";
+                ? "Raw + frequency + spatial stats"
+                : "Frequency + spatial stats";
 
             viewer =
                 std::make_unique<
@@ -1194,16 +1313,29 @@ int main(int argc, char **argv) {
         }
 
         std::cout
-            << "\nCenter worker\n"
-            << "  submitted : "
+            << "\nSpatial stats worker\n"
+            << "  submitted       : "
             << center_worker.submitted()
             << "\n"
-            << "  input drops: "
+            << "  input drops     : "
             << center_worker.input_drops()
             << "\n"
-            << "  window drops: "
+            << "  window drops    : "
             << center_worker.window_drops()
+            << "\n"
+            << "  snapshots       : "
+            << center_worker.snapshots_published()
+            << "\n"
+            << "  CSV rows        : "
+            << center_worker.csv_rows_written()
             << "\n";
+
+        if (!options.stats_csv_path.empty()) {
+            std::cout
+                << "  CSV file        : "
+                << options.stats_csv_path
+                << "\n";
+        }
 
         return 0;
     }

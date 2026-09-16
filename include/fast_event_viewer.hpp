@@ -36,7 +36,16 @@ public:
         float center_marker_half_size_px = 10.0f;
         float center_marker_line_width = 2.0f;
 
-        std::string title = "Raw + frequency + centers";
+        // Draw mean-radius and p95-radius rings around each center.
+        bool show_stat_circles = true;
+        int stat_circle_segments = 48;
+        float stat_circle_line_width = 1.0f;
+
+        // Three live radial-distance histograms below the sensor view.
+        bool show_histograms = true;
+        int histogram_panel_height = 240;
+
+        std::string title = "Raw + frequency + spatial stats";
     };
 
     struct Stats {
@@ -84,6 +93,14 @@ private:
     };
     static_assert(sizeof(Point) == 12);
 
+    struct PlotVertex {
+        float x;
+        float y;
+        float r;
+        float g;
+        float b;
+    };
+
     Config cfg_;
     CenterStore *center_store_ = nullptr;
 
@@ -110,6 +127,7 @@ private:
 
     unsigned int event_program_ = 0;
     unsigned int screen_program_ = 0;
+    unsigned int plot_program_ = 0;
 
     unsigned int event_vao_ = 0;
     unsigned int event_vbo_ = 0;
@@ -117,12 +135,17 @@ private:
     unsigned int quad_vao_ = 0;
     unsigned int quad_vbo_ = 0;
 
+    unsigned int plot_vao_ = 0;
+    unsigned int plot_vbo_ = 0;
+
     unsigned int canvas_texture_ = 0;
     unsigned int canvas_fbo_ = 0;
 
     std::vector<Point> raw_points_;
     std::vector<Point> freq_points_;
     std::vector<Point> center_lines_;
+    std::vector<Point> stat_circle_lines_;
+    std::vector<PlotVertex> plot_vertices_;
 
     bool canvas_initialized_ = false;
     std::uint32_t last_clear_ts_ = 0;
@@ -140,6 +163,10 @@ private:
                      unsigned int primitive);
 
     void draw_centers();
+
+    void draw_histograms(
+        int framebuffer_width,
+        int histogram_height);
 
     void update_window_title();
 

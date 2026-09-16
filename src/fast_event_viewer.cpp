@@ -120,6 +120,14 @@ FastEventViewer::FastEventViewer(const Config &cfg,
     raw_points_.reserve(cfg_.max_raw_points_per_render);
     freq_points_.reserve(cfg_.max_freq_points_per_render);
     center_lines_.reserve(12);
+    stat_circle_lines_.reserve(
+        static_cast<std::size_t>(
+            std::max(8, cfg_.stat_circle_segments))
+        * 4u
+        * CENTER_FREQ_COUNT);
+
+    plot_vertices_.reserve(
+        2u * RADIAL_HISTOGRAM_BINS + 16u);
 
     init_gl();
 }
@@ -214,9 +222,18 @@ void FastEventViewer::init_gl() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
+    const int initial_window_height =
+        cfg_.sensor_height
+        +
+        (
+            cfg_.show_histograms
+            ? std::max(80, cfg_.histogram_panel_height)
+            : 0
+        );
+
     window_ = glfwCreateWindow(
         cfg_.sensor_width,
-        cfg_.sensor_height,
+        initial_window_height,
         cfg_.title.c_str(),
         nullptr,
         nullptr);
@@ -297,8 +314,34 @@ void FastEventViewer::init_gl() {
         }
     )GLSL";
 
+    const char *plot_vs = R"GLSL(
+        #version 330 core
+
+        layout(location=0) in vec2 in_pos;
+        layout(location=1) in vec3 in_color;
+
+        out vec3 vcolor;
+
+        void main() {
+            gl_Position = vec4(in_pos, 0.0, 1.0);
+            vcolor = in_color;
+        }
+    )GLSL";
+
+    const char *plot_fs = R"GLSL(
+        #version 330 core
+
+        in vec3 vcolor;
+        out vec4 frag;
+
+        void main() {
+            frag = vec4(vcolor, 1.0);
+        }
+    )GLSL";
+
     event_program_ = make_program(event_vs, event_fs);
     screen_program_ = make_program(screen_vs, screen_fs);
+    plot_program_ = make_program(plot_vs, plot_fs);
 
     glGenVertexArrays(1, &event_vao_);
     glBindVertexArray(event_vao_);
@@ -364,6 +407,43 @@ void FastEventViewer::init_gl() {
         GL_FALSE,
         2 * sizeof(float),
         nullptr);
+
+    // Histogram line renderer.
+    glGenVertexArrays(1, &plot_vao_);
+    glBindVertexArray(plot_vao_);
+
+    glGenBuffers(1, &plot_vbo_);
+    glBindBuffer(GL_ARRAY_BUFFER, plot_vbo_);
+
+    glBufferData(
+        GL_ARRAY_BUFFER,
+        static_cast<GLsizeiptr>(
+            (2u * RADIAL_HISTOGRAM_BINS + 32u)
+            * sizeof(PlotVertex)),
+        nullptr,
+        GL_STREAM_DRAW);
+
+    glEnableVertexAttribArray(0);
+
+    glVertexAttribPointer(
+        0,
+        2,
+        GL_FLOAT,
+        GL_FALSE,
+        sizeof(PlotVertex),
+        reinterpret_cast<void *>(
+            offsetof(PlotVertex, x)));
+
+    glEnableVertexAttribArray(1);
+
+    glVertexAttribPointer(
+        1,
+        3,
+        GL_FLOAT,
+        GL_FALSE,
+        sizeof(PlotVertex),
+        reinterpret_cast<void *>(
+            offsetof(PlotVertex, r)));
 
     glGenTextures(1, &canvas_texture_);
     glBindTexture(GL_TEXTURE_2D, canvas_texture_);
@@ -445,6 +525,12 @@ void FastEventViewer::destroy_gl() noexcept {
     if (canvas_texture_)
         glDeleteTextures(1, &canvas_texture_);
 
+    if (plot_vbo_)
+        glDeleteBuffers(1, &plot_vbo_);
+
+    if (plot_vao_)
+        glDeleteVertexArrays(1, &plot_vao_);
+
     if (event_vbo_)
         glDeleteBuffers(1, &event_vbo_);
 
@@ -462,6 +548,9 @@ void FastEventViewer::destroy_gl() noexcept {
 
     if (screen_program_)
         glDeleteProgram(screen_program_);
+
+    if (plot_program_)
+        glDeleteProgram(plot_program_);
 
     if (window_)
         glfwDestroyWindow(window_);
@@ -612,6 +701,7 @@ void FastEventViewer::draw_points(
 
 void FastEventViewer::draw_centers() {
     center_lines_.clear();
+    stat_circle_lines_.clear();
 
     const int half =
         std::max(
@@ -620,9 +710,15 @@ void FastEventViewer::draw_centers() {
                 std::lround(
                     cfg_.center_marker_half_size_px)));
 
+    const int segments =
+        std::max(
+            8,
+            cfg_.stat_circle_segments);
+
     for (std::size_t id = 0;
          id < CENTER_FREQ_COUNT;
-         ++id) {
+         ++id)
+    {
         const auto &center =
             center_snapshot_.frequency[id];
 
@@ -656,11 +752,12 @@ void FastEventViewer::draw_centers() {
             };
 
         std::uint8_t r, g, b;
+
         color_for_frequency(
             id,
             r, g, b);
 
-        // Horizontal segment.
+        // Center cross.
         center_lines_.push_back(
             Point{
                 clamp_x(cx - half),
@@ -675,7 +772,6 @@ void FastEventViewer::draw_centers() {
                 center.newest_t,
                 r,g,b,0});
 
-        // Vertical segment.
         center_lines_.push_back(
             Point{
                 clamp_x(cx),
@@ -689,19 +785,419 @@ void FastEventViewer::draw_centers() {
                 clamp_y(cy + half),
                 center.newest_t,
                 r,g,b,0});
+
+        if (!cfg_.show_stat_circles)
+            continue;
+
+        const auto add_circle =
+            [&](float radius)
+            {
+                if (radius <= 0.5f)
+                    return;
+
+                constexpr double TWO_PI =
+                    6.28318530717958647692;
+
+                for (int i = 0;
+                     i < segments;
+                     ++i)
+                {
+                    const double a0 =
+                        TWO_PI
+                        *
+                        static_cast<double>(i)
+                        /
+                        static_cast<double>(segments);
+
+                    const double a1 =
+                        TWO_PI
+                        *
+                        static_cast<double>(i + 1)
+                        /
+                        static_cast<double>(segments);
+
+                    const int x0 =
+                        static_cast<int>(
+                            std::lround(
+                                center.x
+                                +
+                                static_cast<double>(radius)
+                                *
+                                std::cos(a0)));
+
+                    const int y0 =
+                        static_cast<int>(
+                            std::lround(
+                                center.y
+                                +
+                                static_cast<double>(radius)
+                                *
+                                std::sin(a0)));
+
+                    const int x1 =
+                        static_cast<int>(
+                            std::lround(
+                                center.x
+                                +
+                                static_cast<double>(radius)
+                                *
+                                std::cos(a1)));
+
+                    const int y1 =
+                        static_cast<int>(
+                            std::lround(
+                                center.y
+                                +
+                                static_cast<double>(radius)
+                                *
+                                std::sin(a1)));
+
+                    stat_circle_lines_.push_back(
+                        Point{
+                            clamp_x(x0),
+                            clamp_y(y0),
+                            center.newest_t,
+                            r,g,b,0});
+
+                    stat_circle_lines_.push_back(
+                        Point{
+                            clamp_x(x1),
+                            clamp_y(y1),
+                            center.newest_t,
+                            r,g,b,0});
+                }
+            };
+
+        // Inner ring = mean radial distance.
+        add_circle(
+            center.mean_radius);
+
+        // Outer ring = 95th percentile radial distance.
+        add_circle(
+            center.p95_radius);
     }
 
-    if (center_lines_.empty())
-        return;
+    if (!stat_circle_lines_.empty()) {
+        glLineWidth(
+            cfg_.stat_circle_line_width);
 
-    glLineWidth(
-        cfg_.center_marker_line_width);
+        draw_points(
+            stat_circle_lines_,
+            GL_LINES);
+    }
 
-    draw_points(
-        center_lines_,
-        GL_LINES);
+    if (!center_lines_.empty()) {
+        glLineWidth(
+            cfg_.center_marker_line_width);
+
+        draw_points(
+            center_lines_,
+            GL_LINES);
+    }
 
     glLineWidth(1.0f);
+}
+
+
+void FastEventViewer::draw_histograms(
+    int framebuffer_width,
+    int histogram_height)
+{
+    if (!cfg_.show_histograms ||
+        !center_store_ ||
+        histogram_height <= 0)
+    {
+        return;
+    }
+
+    std::uint32_t shared_y_max = 1;
+
+    for (std::size_t id = 0;
+         id < CENTER_FREQ_COUNT;
+         ++id)
+    {
+        const auto &s =
+            center_snapshot_.frequency[id];
+
+        if (!s.valid)
+            continue;
+
+        for (std::uint32_t count :
+             s.radial_histogram)
+        {
+            shared_y_max =
+                std::max(
+                    shared_y_max,
+                    count);
+        }
+    }
+
+    const int panel_width =
+        std::max(
+            1,
+            framebuffer_width
+            /
+            static_cast<int>(
+                CENTER_FREQ_COUNT));
+
+    const float x_left = -0.88f;
+    const float x_right = 0.95f;
+
+    const float y_bottom = -0.78f;
+    const float y_top = 0.88f;
+
+    glUseProgram(
+        plot_program_);
+
+    glBindVertexArray(
+        plot_vao_);
+
+    glBindBuffer(
+        GL_ARRAY_BUFFER,
+        plot_vbo_);
+
+    for (std::size_t id = 0;
+         id < CENTER_FREQ_COUNT;
+         ++id)
+    {
+        const int viewport_x =
+            static_cast<int>(id)
+            *
+            panel_width;
+
+        const int viewport_width =
+            (
+                id ==
+                CENTER_FREQ_COUNT - 1
+            )
+            ?
+            framebuffer_width -
+            viewport_x
+            :
+            panel_width;
+
+        glViewport(
+            viewport_x,
+            0,
+            viewport_width,
+            histogram_height);
+
+        float r = 1.0f;
+        float g = 1.0f;
+        float b = 1.0f;
+
+        if (id == 0) {
+            r = 0.0f;
+            g = 1.0f;
+            b = 0.0f;
+        }
+        else if (id == 1) {
+            r = 1.0f;
+            g = 1.0f;
+            b = 0.0f;
+        }
+        else {
+            r = 0.0f;
+            g = 0.5f;
+            b = 1.0f;
+        }
+
+        // Axes.
+        plot_vertices_.clear();
+
+        auto add_line =
+            [&](float x0,
+                float y0,
+                float x1,
+                float y1,
+                float lr,
+                float lg,
+                float lb)
+            {
+                plot_vertices_.push_back(
+                    PlotVertex{
+                        x0,y0,
+                        lr,lg,lb});
+
+                plot_vertices_.push_back(
+                    PlotVertex{
+                        x1,y1,
+                        lr,lg,lb});
+            };
+
+        add_line(
+            x_left,
+            y_bottom,
+            x_right,
+            y_bottom,
+            0.32f,0.32f,0.36f);
+
+        add_line(
+            x_left,
+            y_bottom,
+            x_left,
+            y_top,
+            0.32f,0.32f,0.36f);
+
+        // 25%, 50%, 75% shared-Y reference lines.
+        for (int q = 1;
+             q <= 3;
+             ++q)
+        {
+            const float fraction =
+                static_cast<float>(q)
+                /
+                4.0f;
+
+            const float y =
+                y_bottom
+                +
+                fraction
+                *
+                (y_top - y_bottom);
+
+            add_line(
+                x_left,
+                y,
+                x_right,
+                y,
+                0.12f,0.12f,0.14f);
+        }
+
+        glBufferData(
+            GL_ARRAY_BUFFER,
+            static_cast<GLsizeiptr>(
+                plot_vertices_.size()
+                *
+                sizeof(PlotVertex)),
+            plot_vertices_.data(),
+            GL_STREAM_DRAW);
+
+        glDrawArrays(
+            GL_LINES,
+            0,
+            static_cast<GLsizei>(
+                plot_vertices_.size()));
+
+        const auto &stats =
+            center_snapshot_.frequency[id];
+
+        if (!stats.valid)
+            continue;
+
+        // One vertical line per radial bin.
+        plot_vertices_.clear();
+
+        for (std::size_t bin = 0;
+             bin < RADIAL_HISTOGRAM_BINS;
+             ++bin)
+        {
+            const float u =
+                (
+                    static_cast<float>(bin)
+                    +
+                    0.5f
+                )
+                /
+                static_cast<float>(
+                    RADIAL_HISTOGRAM_BINS);
+
+            const float x =
+                x_left
+                +
+                u
+                *
+                (x_right - x_left);
+
+            const float fraction =
+                static_cast<float>(
+                    stats.radial_histogram[bin])
+                /
+                static_cast<float>(
+                    shared_y_max);
+
+            const float y =
+                y_bottom
+                +
+                fraction
+                *
+                (y_top - y_bottom);
+
+            add_line(
+                x,
+                y_bottom,
+                x,
+                y,
+                r,g,b);
+        }
+
+        // Mean radius marker.
+        const float x_max =
+            std::max(
+                1.0f,
+                center_snapshot_
+                    .histogram_max_radius_px);
+
+        const auto radius_to_x =
+            [&](float radius)
+            {
+                const float u =
+                    std::clamp(
+                        radius / x_max,
+                        0.0f,
+                        1.0f);
+
+                return
+                    x_left
+                    +
+                    u
+                    *
+                    (x_right - x_left);
+            };
+
+        const float mean_x =
+            radius_to_x(
+                stats.mean_radius);
+
+        const float p95_x =
+            radius_to_x(
+                stats.p95_radius);
+
+        // Mean = full-height marker.
+        add_line(
+            mean_x,
+            y_bottom,
+            mean_x,
+            y_top,
+            r,g,b);
+
+        // p95 = shorter marker.
+        add_line(
+            p95_x,
+            y_bottom,
+            p95_x,
+            y_bottom
+                +
+                0.55f
+                *
+                (y_top - y_bottom),
+            r,g,b);
+
+        glBufferData(
+            GL_ARRAY_BUFFER,
+            static_cast<GLsizeiptr>(
+                plot_vertices_.size()
+                *
+                sizeof(PlotVertex)),
+            plot_vertices_.data(),
+            GL_STREAM_DRAW);
+
+        glDrawArrays(
+            GL_LINES,
+            0,
+            static_cast<GLsizei>(
+                plot_vertices_.size()));
+    }
 }
 
 void FastEventViewer::update_window_title() {
@@ -709,7 +1205,13 @@ void FastEventViewer::update_window_title() {
         return;
 
     std::ostringstream title;
-    title << cfg_.title << " | centers ";
+
+    title
+        << cfg_.title
+        << " | hist[0.."
+        << center_snapshot_.histogram_max_radius_px
+        << "px]"
+        << " | radial stats ";
 
     static constexpr const char *names[3] = {
         "165", "366", "596"
@@ -721,27 +1223,34 @@ void FastEventViewer::update_window_title() {
 
     for (std::size_t id = 0;
          id < 3;
-         ++id) {
+         ++id)
+    {
         if (id != 0)
             title << " | ";
 
-        const auto &c =
+        const auto &s =
             center_snapshot_.frequency[id];
 
         title << names[id] << ":";
 
-        if (!c.valid) {
+        if (!s.valid) {
             title << "--";
         }
         else {
             title
-                << "("
-                << c.x
+                << "c("
+                << s.x
                 << ","
-                << c.y
+                << s.y
                 << ")"
+                << " mu="
+                << s.mean_radius
+                << " sd="
+                << s.std_radius
+                << " p95="
+                << s.p95_radius
                 << " N="
-                << c.sample_count;
+                << s.sample_count;
         }
     }
 
@@ -864,6 +1373,32 @@ bool FastEventViewer::render_once() {
 
     glClear(GL_COLOR_BUFFER_BIT);
 
+    const int histogram_height =
+        cfg_.show_histograms
+        ?
+        std::clamp(
+            cfg_.histogram_panel_height,
+            80,
+            std::max(
+                80,
+                framebuffer_height / 2))
+        :
+        0;
+
+    const int sensor_view_height =
+        std::max(
+            1,
+            framebuffer_height
+            -
+            histogram_height);
+
+    // Sensor image occupies the upper viewport.
+    glViewport(
+        0,
+        histogram_height,
+        framebuffer_width,
+        sensor_view_height);
+
     glUseProgram(
         screen_program_);
 
@@ -888,9 +1423,15 @@ bool FastEventViewer::render_once() {
         0,
         6);
 
-    // Centers are a screen overlay, not written into persistent canvas.
-    // Therefore the cross marks do not leave trails.
+    // Centers/radius circles use sensor pixel coordinates and therefore
+    // must be drawn while the sensor viewport is active.
     draw_centers();
+
+    // Three radial-distance histograms occupy the lower strip.
+    // Their Y scale is shared across all three frequencies.
+    draw_histograms(
+        framebuffer_width,
+        histogram_height);
 
     glfwSwapBuffers(window_);
 

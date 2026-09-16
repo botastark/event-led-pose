@@ -2,10 +2,11 @@
   "serial": "00050946",
   "biases": {
     "bias_diff_on": 50,
-    "bias_diff_off": 80,
-    "bias_refr": 55,
-    "bias_fo": 55,
-    "bias_hpf": 0
+    "bias_diff_off": 100
+    // ,
+    // "bias_refr": 55,
+    // "bias_fo": 20,
+    // "bias_hpf": 0
   },
   "png_rate_hz": 30,
   "accumulation_time_us": 10000
