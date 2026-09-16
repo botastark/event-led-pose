@@ -1,14 +1,31 @@
-/data/raw/
-/data/reports/
-*.raw
-*.h5
-*.hdf5
-/tools/__pycache__/
+.vscode/
+.venv/
+build/
 
-# Python-generated files
-__pycache__/
-*.py[cod]
-# Local development backups
-*.before-*
-*.bak
-EVENT*.md
+# CMake/build
+/build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+Makefile
+cmake_install.cmake
+compile_commands.json
+
+# binaries
+*.o
+*.a
+*.so
+
+# recordings / generated outputs
+*.raw
+
+# editor
+.vscode/
+.idea/
+
+# temporary
+*.log
+*~
+.DS_Store
+
+/data/

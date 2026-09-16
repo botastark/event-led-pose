@@ -49,8 +49,6 @@ evk_node="/dev/bus/usb/${bus}/${device}"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/../.." && pwd)"
 
-mkdir -p "$repo_root/data/raw" "$repo_root/data/reports"
-
 host_user="$(id -un)"
 
 cleanup()
