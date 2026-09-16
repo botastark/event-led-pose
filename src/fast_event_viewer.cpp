@@ -108,6 +108,28 @@ inline void color_for_frequency(std::size_t id,
     }
 }
 
+inline void color_for_overlay(std::size_t id,
+                              std::uint8_t &r,
+                              std::uint8_t &g,
+                              std::uint8_t &b) noexcept {
+    // Darker shades of the classified-event colors, used only for
+    // center crosses and radial-statistics circles.
+    switch (id) {
+    case 0:
+        r = 0; g = 150; b = 0;       // dark green, 165 Hz
+        break;
+    case 1:
+        r = 165; g = 165; b = 0;     // dark yellow/olive, 366 Hz
+        break;
+    case 2:
+        r = 0; g = 75; b = 155;      // dark blue, 596 Hz
+        break;
+    default:
+        r = g = b = 150;
+        break;
+    }
+}
+
 } // namespace
 
 
@@ -753,7 +775,7 @@ void FastEventViewer::draw_centers() {
 
         std::uint8_t r, g, b;
 
-        color_for_frequency(
+        color_for_overlay(
             id,
             r, g, b);
 

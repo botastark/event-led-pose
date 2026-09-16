@@ -90,7 +90,7 @@ ON→OFF ---- T ---- ON→OFF
 
 ```
 
-These intervals are compared against the known LED periods for 165, 366, and 596 Hz, including \(2T\), \(3T\), and \(4T\) to tolerate missed transitions.
+These intervals are compared against the known LED periods for 165, 366, and 596 Hz. Missed-cycle multiples are allowed where configured; 165 Hz currently uses a stricter set to reduce fast-motion false positives.
 
 ```text
 
@@ -106,24 +106,4 @@ fall ring: [dt1][dt2]  -> ON→OFF periods
 
 ```
 
-A frequency can be accepted from one valid rise interval plus one valid fall interval, or from two consistent intervals from a single polarity when the other polarity is weak. This keeps the filter fast, memory-efficient, and more robust than relying on a single timing interval.
-
-## Current limitations
-
-- The frequency classifier can still produce false positives on moving background edges.
-- Frequency discrimination depends on the size of the per-pixel polarity interval rings, timing tolerance, and the amount of consistent rise/fall evidence.
-- Spatial LED center extraction and rigid-marker pose estimation are still under development.
-- Metric 6-DoF pose is not yet implemented.
-
-## Next steps
-
-Current development priorities:
-
-1. reduce false frequency detections from fast moving background edges;
-2. tune rise/fall interval consistency, ring size, and timing tolerances while keeping per-pixel state small;
-3. benchmark event throughput and end-to-end latency;
-4. separate frequency identity from instantaneous LED position;
-5. estimate stable LED centers;
-6. add rigid three-point marker tracking;
-7. add calibrated 6-DoF pose estimation;
-8. remove the container dependency once the native OpenEB setup is reproducible.
+A frequency is accepted only after coherent evidence from both polarities. Each polarity keeps two matching intervals; a mismatch clears that polarity's evidence, and stale candidates are expired with a short timeout. This prevents isolated background matches from accumulating over time.
