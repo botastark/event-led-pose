@@ -297,42 +297,6 @@ inline std::uint8_t classify_interval(
 }
 
 
-// Opposite transition phase:
-//
-//   2*dt ~= odd*T
-//
-// because dt ~= 0.5T, 1.5T, 2.5T, ...
-inline bool match_cross_transition_phase(
-    std::uint32_t dt,
-    std::uint16_t period) noexcept
-{
-    const std::uint64_t twice =
-        2ull * static_cast<std::uint64_t>(dt);
-
-    static constexpr std::array<std::uint32_t, 8> ODD = {
-        1,3,5,7,9,11,13,15
-    };
-
-    for (const std::uint32_t n : ODD) {
-        const std::uint64_t expected =
-            static_cast<std::uint64_t>(n) * period;
-
-        const std::uint64_t error =
-            twice > expected
-                ? twice - expected
-                : expected - twice;
-
-        if (error * 1000ull <=
-            expected * CROSS_TOLERANCE_PERMILLE)
-        {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-
 inline int ring_matches(const IntervalRing2 &ring,
                         const FrequencyConfig &f) noexcept {
     int matches = 0;
@@ -347,56 +311,6 @@ inline int ring_matches(const IntervalRing2 &ring,
 
     return matches;
 }
-
-
-// Score a frequency using BOTH transition directions.
-//
-// Primary evidence:
-//   OFF->ON -> OFF->ON = nT
-//   ON->OFF -> ON->OFF = nT
-//
-// Strong lock:
-//   at least one matching interval from both transition directions.
-//
-// Fallback:
-//   three total matches if one polarity is not reliable.
-//
-// Cross-phase can confirm but is not mandatory.
-inline int score_frequency(const PixelState &s,
-                           std::uint8_t id,
-                           std::uint32_t now,
-                           bool current_polarity) noexcept {
-    const auto &f = FREQ[id];
-
-    const int rise =
-        ring_matches(s.rise_periods, f);
-
-    const int fall =
-        ring_matches(s.fall_periods, f);
-
-    int score = rise + fall;
-
-    if (rise > 0 && fall > 0)
-        score += 2; // explicit both-edge bonus
-
-    // Optional cross-transition phase confirmation using newest
-    // rise/fall absolute timestamps.
-    if (s.last_rise != 0 && s.last_fall != 0) {
-        const std::uint32_t dt =
-            s.last_rise > s.last_fall
-                ? s.last_rise - s.last_fall
-                : s.last_fall - s.last_rise;
-
-        if (match_cross_transition_phase(dt, f.period_us))
-            ++score;
-    }
-
-    (void)now;
-    (void)current_polarity;
-
-    return score;
-}
-
 
 // ============================================================
 // TRANSITION-RING FILTER
@@ -463,15 +377,6 @@ inline Result process_event(PixelState &s,
             // Refresh lifetime only on genuine matching evidence.
             s.last_support_tick =
                 support_tick(now);
-
-            const int score =
-                score_frequency(
-                    s,
-                    s.candidate,
-                    now,
-                    polarity);
-
-            (void)score;
 
             const int rise =
                 ring_matches(
