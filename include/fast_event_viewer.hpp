@@ -2,11 +2,13 @@
 
 #include "center_worker.hpp"
 #include "packed_event.hpp"
+#include "pose_estimator.hpp"
 #include "spsc_ring.hpp"
 
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -45,6 +47,11 @@ public:
         bool show_histograms = true;
         int histogram_panel_height = 240;
 
+        // Latest pose and diagnostics drawn in the upper-left of the
+        // sensor/event viewport. This does not alter the window title.
+        bool show_pose_overlay = true;
+        int pose_text_scale = 2;
+
         std::string title = "Raw + frequency + spatial stats";
     };
 
@@ -75,6 +82,10 @@ public:
                    std::uint32_t t,
                    std::uint8_t frequency_id) noexcept;
     void freq_end_batch() noexcept;
+
+    // Thread-safe handoff from the pose-estimation worker to the renderer.
+    // Submit both valid and invalid results so loss of pose is visible.
+    void submit_pose(const PoseResult &pose);
 
     void run();
 
@@ -153,6 +164,13 @@ private:
     CenterSnapshot center_snapshot_;
     std::uint64_t center_version_ = 0;
 
+    std::mutex pose_mutex_;
+    PoseResult pending_pose_;
+    PoseResult displayed_pose_;
+    std::atomic<std::uint64_t> pose_version_{0};
+    std::uint64_t displayed_pose_version_ = 0;
+    bool have_displayed_pose_ = false;
+
     void init_gl();
     void destroy_gl() noexcept;
 
@@ -168,7 +186,9 @@ private:
         int framebuffer_width,
         int histogram_height);
 
-    void update_window_title();
+    void draw_pose_overlay(
+        int framebuffer_width,
+        int sensor_view_height);
 
     bool render_once();
 };

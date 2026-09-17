@@ -7,6 +7,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <iomanip>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -128,6 +130,51 @@ inline void color_for_overlay(std::size_t id,
     }
 }
 
+std::array<std::uint8_t, 7> glyph_rows(char c) noexcept {
+    using G = std::array<std::uint8_t, 7>;
+
+    switch (c) {
+    case 'A': return G{0x0e,0x11,0x11,0x1f,0x11,0x11,0x11};
+    case 'B': return G{0x1e,0x11,0x11,0x1e,0x11,0x11,0x1e};
+    case 'C': return G{0x0e,0x11,0x10,0x10,0x10,0x11,0x0e};
+    case 'D': return G{0x1e,0x11,0x11,0x11,0x11,0x11,0x1e};
+    case 'E': return G{0x1f,0x10,0x10,0x1e,0x10,0x10,0x1f};
+    case 'F': return G{0x1f,0x10,0x10,0x1e,0x10,0x10,0x10};
+    case 'G': return G{0x0e,0x11,0x10,0x17,0x11,0x11,0x0f};
+    case 'H': return G{0x11,0x11,0x11,0x1f,0x11,0x11,0x11};
+    case 'I': return G{0x1f,0x04,0x04,0x04,0x04,0x04,0x1f};
+    case 'J': return G{0x07,0x02,0x02,0x02,0x12,0x12,0x0c};
+    case 'K': return G{0x11,0x12,0x14,0x18,0x14,0x12,0x11};
+    case 'L': return G{0x10,0x10,0x10,0x10,0x10,0x10,0x1f};
+    case 'M': return G{0x11,0x1b,0x15,0x15,0x11,0x11,0x11};
+    case 'N': return G{0x11,0x19,0x15,0x13,0x11,0x11,0x11};
+    case 'O': return G{0x0e,0x11,0x11,0x11,0x11,0x11,0x0e};
+    case 'P': return G{0x1e,0x11,0x11,0x1e,0x10,0x10,0x10};
+    case 'R': return G{0x1e,0x11,0x11,0x1e,0x14,0x12,0x11};
+    case 'S': return G{0x0f,0x10,0x10,0x0e,0x01,0x01,0x1e};
+    case 'T': return G{0x1f,0x04,0x04,0x04,0x04,0x04,0x04};
+    case 'U': return G{0x11,0x11,0x11,0x11,0x11,0x11,0x0e};
+    case 'V': return G{0x11,0x11,0x11,0x11,0x11,0x0a,0x04};
+    case 'X': return G{0x11,0x11,0x0a,0x04,0x0a,0x11,0x11};
+    case 'Y': return G{0x11,0x11,0x0a,0x04,0x04,0x04,0x04};
+    case 'Z': return G{0x1f,0x01,0x02,0x04,0x08,0x10,0x1f};
+    case '0': return G{0x0e,0x11,0x13,0x15,0x19,0x11,0x0e};
+    case '1': return G{0x04,0x0c,0x04,0x04,0x04,0x04,0x0e};
+    case '2': return G{0x0e,0x11,0x01,0x02,0x04,0x08,0x1f};
+    case '3': return G{0x1e,0x01,0x01,0x0e,0x01,0x01,0x1e};
+    case '4': return G{0x02,0x06,0x0a,0x12,0x1f,0x02,0x02};
+    case '5': return G{0x1f,0x10,0x10,0x1e,0x01,0x01,0x1e};
+    case '6': return G{0x0e,0x10,0x10,0x1e,0x11,0x11,0x0e};
+    case '7': return G{0x1f,0x01,0x02,0x04,0x08,0x08,0x08};
+    case '8': return G{0x0e,0x11,0x11,0x0e,0x11,0x11,0x0e};
+    case '9': return G{0x0e,0x11,0x11,0x0f,0x01,0x01,0x0e};
+    case '-': return G{0x00,0x00,0x00,0x1f,0x00,0x00,0x00};
+    case '.': return G{0x00,0x00,0x00,0x00,0x00,0x0c,0x0c};
+    case '/': return G{0x01,0x01,0x02,0x04,0x08,0x10,0x10};
+    default:  return G{0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+    }
+}
+
 } // namespace
 
 
@@ -227,6 +274,15 @@ void FastEventViewer::freq_end_batch() noexcept {
     freq_ring_drops_.fetch_add(
         freq_batch_dropped_,
         std::memory_order_relaxed);
+}
+
+void FastEventViewer::submit_pose(const PoseResult &pose) {
+    {
+        std::lock_guard<std::mutex> lock(pose_mutex_);
+        pending_pose_ = pose;
+    }
+
+    pose_version_.fetch_add(1, std::memory_order_release);
 }
 
 
@@ -1240,6 +1296,176 @@ void FastEventViewer::draw_histograms(
     }
 }
 
+void FastEventViewer::draw_pose_overlay(
+    int framebuffer_width,
+    int sensor_view_height)
+{
+    if (!cfg_.show_pose_overlay ||
+        !have_displayed_pose_ ||
+        framebuffer_width <= 0 ||
+        sensor_view_height <= 0)
+    {
+        return;
+    }
+
+    const int scale = std::clamp(cfg_.pose_text_scale, 1, 4);
+    std::array<std::string, 4> lines;
+
+    if (displayed_pose_.valid) {
+        std::ostringstream position;
+        position << std::fixed << std::setprecision(1)
+                 << "POSE X " << displayed_pose_.position_mm[0]
+                 << " Y " << displayed_pose_.position_mm[1]
+                 << " Z " << displayed_pose_.position_mm[2]
+                 << " MM";
+        lines[0] = position.str();
+
+        std::ostringstream angles;
+        angles << std::fixed << std::setprecision(1)
+               << "RPY R " << displayed_pose_.rpy_deg[0]
+               << " P " << displayed_pose_.rpy_deg[1]
+               << " Y " << displayed_pose_.rpy_deg[2]
+               << " DEG";
+        lines[1] = angles.str();
+
+        std::ostringstream quality;
+        quality << std::fixed << std::setprecision(2)
+                << "FIT " << displayed_pose_.reprojection_rms_px
+                << " PX JUMP " << displayed_pose_.translation_jump_mm
+                << " MM " << displayed_pose_.rotation_jump_deg
+                << " DEG";
+        lines[2] = quality.str();
+    }
+    else {
+        lines[0] = "POSE INVALID";
+        lines[1] = "CHECK CENTERS CALIBRATION AND LIMITS";
+        lines[2].clear();
+    }
+
+    std::ostringstream candidates;
+    candidates << "CAND "
+               << displayed_pose_.accepted_candidate_count
+               << "/"
+               << displayed_pose_.candidate_count;
+    lines[3] = candidates.str();
+
+    std::size_t longest = 0;
+    for (const auto &line : lines)
+        longest = std::max(longest, line.size());
+
+    const float left_px = 10.0f;
+    const float top_px = 10.0f;
+    const float char_step = 6.0f * static_cast<float>(scale);
+    const float line_step = 9.0f * static_cast<float>(scale);
+    const float box_width =
+        12.0f + char_step * static_cast<float>(longest);
+    const float box_height =
+        10.0f + line_step * static_cast<float>(lines.size());
+
+    const auto x_ndc = [&](float x) {
+        return -1.0f + 2.0f * x /
+            static_cast<float>(framebuffer_width);
+    };
+
+    const auto y_ndc = [&](float y) {
+        return 1.0f - 2.0f * y /
+            static_cast<float>(sensor_view_height);
+    };
+
+    glUseProgram(plot_program_);
+    glBindVertexArray(plot_vao_);
+    glBindBuffer(GL_ARRAY_BUFFER, plot_vbo_);
+
+    // Opaque background keeps diagnostics readable over dense events.
+    const float x0 = x_ndc(left_px - 4.0f);
+    const float x1 = x_ndc(
+        std::min(
+            static_cast<float>(framebuffer_width),
+            left_px + box_width));
+    const float y0 = y_ndc(top_px - 4.0f);
+    const float y1 = y_ndc(
+        std::min(
+            static_cast<float>(sensor_view_height),
+            top_px + box_height));
+
+    const PlotVertex background[] = {
+        {x0,y0,0.02f,0.02f,0.02f},
+        {x1,y0,0.02f,0.02f,0.02f},
+        {x1,y1,0.02f,0.02f,0.02f},
+        {x0,y0,0.02f,0.02f,0.02f},
+        {x1,y1,0.02f,0.02f,0.02f},
+        {x0,y1,0.02f,0.02f,0.02f}
+    };
+
+    glBufferData(
+        GL_ARRAY_BUFFER,
+        sizeof(background),
+        background,
+        GL_STREAM_DRAW);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+
+    const float tr = displayed_pose_.valid ? 0.75f : 1.0f;
+    const float tg = displayed_pose_.valid ? 1.0f : 0.35f;
+    const float tb = displayed_pose_.valid ? 0.75f : 0.25f;
+
+    plot_vertices_.clear();
+
+    for (std::size_t line_index = 0;
+         line_index < lines.size();
+         ++line_index)
+    {
+        const float text_y =
+            top_px +
+            static_cast<float>(line_index) * line_step;
+
+        for (std::size_t char_index = 0;
+             char_index < lines[line_index].size();
+             ++char_index)
+        {
+            const auto rows = glyph_rows(lines[line_index][char_index]);
+            const float text_x =
+                left_px +
+                static_cast<float>(char_index) * char_step;
+
+            for (int row = 0; row < 7; ++row) {
+                for (int col = 0; col < 5; ++col) {
+                    if ((rows[static_cast<std::size_t>(row)] &
+                         (1u << (4 - col))) == 0)
+                    {
+                        continue;
+                    }
+
+                    const float px =
+                        text_x + static_cast<float>(col * scale);
+                    const float py =
+                        text_y + static_cast<float>(row * scale);
+                    const float half =
+                        0.45f * static_cast<float>(scale);
+
+                    plot_vertices_.push_back(
+                        PlotVertex{x_ndc(px - half), y_ndc(py), tr,tg,tb});
+                    plot_vertices_.push_back(
+                        PlotVertex{x_ndc(px + half), y_ndc(py), tr,tg,tb});
+                }
+            }
+        }
+    }
+
+    glBufferData(
+        GL_ARRAY_BUFFER,
+        static_cast<GLsizeiptr>(
+            plot_vertices_.size() * sizeof(PlotVertex)),
+        plot_vertices_.data(),
+        GL_STREAM_DRAW);
+
+    glLineWidth(static_cast<float>(scale));
+    glDrawArrays(
+        GL_LINES,
+        0,
+        static_cast<GLsizei>(plot_vertices_.size()));
+    glLineWidth(1.0f);
+}
+
 
 // ============================================================
 // RENDER LOOP
@@ -1262,9 +1488,22 @@ bool FastEventViewer::render_once() {
 
     }
 
+    bool have_pose_update = false;
+    const std::uint64_t pose_version =
+        pose_version_.load(std::memory_order_acquire);
+
+    if (pose_version != displayed_pose_version_) {
+        std::lock_guard<std::mutex> lock(pose_mutex_);
+        displayed_pose_ = pending_pose_;
+        displayed_pose_version_ = pose_version;
+        have_displayed_pose_ = true;
+        have_pose_update = true;
+    }
+
     if (!have_raw &&
         !have_freq &&
-        !have_center_update) {
+        !have_center_update &&
+        !have_pose_update) {
         return false;
     }
 
@@ -1405,6 +1644,12 @@ bool FastEventViewer::render_once() {
     // Centers/radius circles use sensor pixel coordinates and therefore
     // must be drawn while the sensor viewport is active.
     draw_centers();
+
+    // Pose and fit diagnostics are drawn over the event viewport, never in
+    // the window title or terminal stream.
+    draw_pose_overlay(
+        framebuffer_width,
+        sensor_view_height);
 
     // Three radial-distance histograms occupy the lower strip.
     // Their Y scale is shared across all three frequencies.

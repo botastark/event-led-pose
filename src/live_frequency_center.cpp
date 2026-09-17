@@ -954,38 +954,10 @@ int main(int argc, char **argv) {
 
                     const PoseResult pose =
                         pose_estimator->estimate(snapshot);
+                    viewer->submit_pose(pose);
 
                     if (!pose.valid)
                         continue;
-
-                    const auto now =
-                        std::chrono::steady_clock::now();
-
-                    if (now - last_print <
-                        std::chrono::milliseconds(100))
-                    {
-                        continue;
-                    }
-
-                    last_print = now;
-
-                    std::cout
-                        << "POSE centroid_cam_mm=("
-                        << pose.position_mm[0] << ", "
-                        << pose.position_mm[1] << ", "
-                        << pose.position_mm[2] << ")"
-                        << " rpy_deg=("
-                        << pose.rpy_deg[0] << ", "
-                        << pose.rpy_deg[1] << ", "
-                        << pose.rpy_deg[2] << ")"
-                        << " reproj="
-                        << pose.reprojection_rms_px
-                        << "px"
-                        << " candidates="
-                        << pose.accepted_candidate_count
-                        << "/"
-                        << pose.candidate_count
-                        << "\n";
                 }
             });
         }

@@ -88,6 +88,12 @@ target_link_libraries(pose_estimator
         ${OpenCV_LIBS}
 )
 
+target_link_libraries(fast_event_viewer
+    PUBLIC
+        pose_estimator
+)
+
+
 add_executable(
     live_frequency_center
     src/live_frequency_center.cpp

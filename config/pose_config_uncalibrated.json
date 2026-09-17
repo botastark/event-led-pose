@@ -1,0 +1,33 @@
+{
+  "NOTE": "PROVISIONAL camera model after the lenses were moved. Intrinsics are only startup estimates copied from the previous focal scale; principal point is the sensor center and distortion is disabled. Recalibrate before treating metric position or orientation as accurate. LED geometry is unchanged. Marker convention: +X right, +Y up, Z=0 plane. Pose estimator recenters these points internally so tvec is the triangle centroid pose.",
+  "camera": {
+    "width": 1280,
+    "height": 720,
+    "fx": 889.0,
+    "fy": 889.0,
+    "cx": 639.5,
+    "cy": 359.5,
+    "dist": [0.0, 0.0, 0.0, 0.0, 0.0]
+  },
+  "led_points_mm": {
+    "165": [-8.0, -3.0, 0.0],
+    "366": [8.0, -3.0, 0.0],
+    "596": [0.0, 7.5, 0.0]
+  },
+  "quality": {
+    "min_samples": 8,
+    "max_p95_radius_px": 80.0,
+    "max_reprojection_rms_px": 5.0
+  },
+  "angle_limits_deg": {
+    "roll": [-180.0, 180.0],
+    "pitch": [-180.0, 180.0],
+    "yaw": [-180.0, 180.0]
+  },
+  "continuity": {
+    "max_translation_jump_mm": 250.0,
+    "max_rotation_jump_deg": 45.0,
+    "translation_cost_per_mm": 0.01,
+    "rotation_cost_per_deg": 0.05
+  }
+}
