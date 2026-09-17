@@ -169,10 +169,6 @@ struct PixelState {
     std::uint16_t last_support_tick = 0;
 
     std::uint8_t candidate = NO_CANDIDATE;
-
-    // bit 0: candidate has rise support
-    // bit 1: candidate has fall support
-    std::uint8_t support_mask = 0;
 };
 
 static_assert(sizeof(PixelState) == 20,
@@ -201,7 +197,6 @@ inline void reset_candidate(
     s.fall_periods = {};
     s.last_support_tick = 0;
     s.candidate = NO_CANDIDATE;
-    s.support_mask = 0;
 }
 
 inline bool candidate_timed_out(
@@ -425,9 +420,6 @@ inline Result process_event(PixelState &s,
     IntervalRing2 &period_ring =
         polarity ? s.rise_periods : s.fall_periods;
 
-    const std::uint8_t support_bit =
-        polarity ? 0x01 : 0x02;
-
     // --------------------------------------------------------
     // 1. BURST SUPPRESSION
     // --------------------------------------------------------
@@ -467,8 +459,6 @@ inline Result process_event(PixelState &s,
         if (match_same_transition_period(dt, f)) {
             period_ring.push(
                 static_cast<std::uint16_t>(dt));
-
-            s.support_mask |= support_bit;
 
             // Refresh lifetime only on genuine matching evidence.
             s.last_support_tick =
@@ -517,8 +507,6 @@ inline Result process_event(PixelState &s,
         // This prevents isolated matches separated by arbitrary
         // background intervals from accumulating in Ring2.
         period_ring = {};
-        s.support_mask &=
-            static_cast<std::uint8_t>(~support_bit);
 
         // See whether this interval points to a different known
         // frequency.
@@ -532,7 +520,6 @@ inline Result process_event(PixelState &s,
             s.fall_periods = {};
 
             s.candidate = other;
-            s.support_mask = support_bit;
             s.last_support_tick =
                 support_tick(now);
 
@@ -568,7 +555,6 @@ inline Result process_event(PixelState &s,
         return out;
 
     s.candidate = id;
-    s.support_mask = support_bit;
     s.last_support_tick =
         support_tick(now);
 
