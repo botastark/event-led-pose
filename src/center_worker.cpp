@@ -296,13 +296,13 @@ CenterWorker::compute_frequency_stats(
 
     radial_scratch_.clear();
 
-    // reserve() does nothing after first growth.
-    if (radial_scratch_.capacity() < n)
-        radial_scratch_.reserve(n);
-
     double sum_r = 0.0;
-    double sum_r2 = 0.0;
-    float max_r = 0.0f;
+
+    // Constant for the whole snapshot; compute once, not per sample.
+    const float histogram_max =
+        std::max(
+            1.0f,
+            config_.histogram_max_radius_px);
 
     for (const CenterSample &sample :
          window.samples)
@@ -326,21 +326,6 @@ CenterWorker::compute_frequency_stats(
 
         sum_r += radius;
 
-        sum_r2 +=
-            static_cast<double>(
-                radius)
-            *
-            static_cast<double>(
-                radius);
-
-        if (radius > max_r)
-            max_r = radius;
-
-        const float histogram_max =
-            std::max(
-                1.0f,
-                config_.histogram_max_radius_px);
-
         std::size_t bin =
             static_cast<std::size_t>(
                 radius
@@ -360,31 +345,9 @@ CenterWorker::compute_frequency_stats(
         sum_r /
         static_cast<double>(n);
 
-    const double mean_r2 =
-        sum_r2 /
-        static_cast<double>(n);
-
-    // Population variance over the current event window.
-    const double variance =
-        std::max(
-            0.0,
-            mean_r2 -
-            mean_r * mean_r);
-
     result.mean_radius =
         static_cast<float>(
             mean_r);
-
-    result.std_radius =
-        static_cast<float>(
-            std::sqrt(variance));
-
-    result.rms_radius =
-        static_cast<float>(
-            std::sqrt(mean_r2));
-
-    result.max_radius =
-        max_r;
 
     // Exact p95 without sorting the entire vector.
     const std::size_t p95_index =
@@ -472,10 +435,7 @@ void CenterWorker::open_csv() {
         << "center_x_px,"
         << "center_y_px,"
         << "mean_radius_px,"
-        << "std_radius_px,"
-        << "rms_radius_px,"
-        << "p95_radius_px,"
-        << "max_radius_px\n";
+        << "p95_radius_px\n";
 
     last_csv_flush_ =
         std::chrono::steady_clock::now();
@@ -517,13 +477,7 @@ void CenterWorker::write_csv_snapshot(
             << ','
             << s.mean_radius
             << ','
-            << s.std_radius
-            << ','
-            << s.rms_radius
-            << ','
             << s.p95_radius
-            << ','
-            << s.max_radius
             << '\n';
 
         csv_rows_written_.fetch_add(

@@ -377,26 +377,9 @@ inline Result process_event(PixelState &s,
             // Refresh lifetime only on genuine matching evidence.
             s.last_support_tick =
                 support_tick(now);
-
-            const int rise =
-                ring_matches(
-                    s.rise_periods,
-                    f);
-
-            const int fall =
-                ring_matches(
-                    s.fall_periods,
-                    f);
-
-            const int total =
-                rise + fall;
-
-            const bool both_edges =
-                rise > 0 && fall > 0;
-
             const bool robust =
-                rise >= 2 &&
-                fall >= 2;
+                s.rise_periods.count_nonzero() >= 2 &&
+                s.fall_periods.count_nonzero() >= 2;
 
             if (robust) {
                 out.passed = true;

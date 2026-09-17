@@ -7,8 +7,6 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
-#include <iomanip>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -1185,6 +1183,26 @@ void FastEventViewer::draw_histograms(
             radius_to_x(
                 stats.p95_radius);
 
+        // Put the two retained radius statistics directly on the histogram
+        // x-axis as tick marks. This avoids formatting them into the window
+        // title while keeping their locations visible on the plot.
+        const float tick_h =
+            0.06f * (y_top - y_bottom);
+
+        add_line(
+            mean_x,
+            y_bottom,
+            mean_x,
+            y_bottom + tick_h,
+            r,g,b);
+
+        add_line(
+            p95_x,
+            y_bottom,
+            p95_x,
+            y_bottom + tick_h,
+            r,g,b);
+
         // Mean = full-height marker.
         add_line(
             mean_x,
@@ -1222,65 +1240,6 @@ void FastEventViewer::draw_histograms(
     }
 }
 
-void FastEventViewer::update_window_title() {
-    if (!center_store_)
-        return;
-
-    std::ostringstream title;
-
-    title
-        << cfg_.title
-        << " | hist[0.."
-        << center_snapshot_.histogram_max_radius_px
-        << "px]"
-        << " | radial stats ";
-
-    static constexpr const char *names[3] = {
-        "165", "366", "596"
-    };
-
-    title
-        << std::fixed
-        << std::setprecision(1);
-
-    for (std::size_t id = 0;
-         id < 3;
-         ++id)
-    {
-        if (id != 0)
-            title << " | ";
-
-        const auto &s =
-            center_snapshot_.frequency[id];
-
-        title << names[id] << ":";
-
-        if (!s.valid) {
-            title << "--";
-        }
-        else {
-            title
-                << "c("
-                << s.x
-                << ","
-                << s.y
-                << ")"
-                << " mu="
-                << s.mean_radius
-                << " sd="
-                << s.std_radius
-                << " p95="
-                << s.p95_radius
-                << " N="
-                << s.sample_count;
-        }
-    }
-
-    glfwSetWindowTitle(
-        window_,
-        title.str().c_str());
-}
-
 
 // ============================================================
 // RENDER LOOP
@@ -1301,8 +1260,6 @@ bool FastEventViewer::render_once() {
                 center_version_,
                 center_snapshot_);
 
-        if (have_center_update)
-            update_window_title();
     }
 
     if (!have_raw &&
