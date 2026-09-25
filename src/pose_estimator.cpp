@@ -286,7 +286,7 @@ PoseResult PoseEstimator::estimate(
 
     std::vector<cv::Mat> rvecs;
     std::vector<cv::Mat> tvecs;
-
+// SOLVEPNP_SQPNP
     const int solutions = cv::solveP3P(
         object_points,
         image_points,
@@ -295,6 +295,16 @@ PoseResult PoseEstimator::estimate(
         rvecs,
         tvecs,
         cv::SOLVEPNP_P3P);
+
+    // const int solutions = cv::solvePnPGeneric(
+    //     object_points,
+    //     image_points,
+    //     cv::Mat(config_.camera_matrix),
+    //     config_.dist_coeffs,
+    //     rvecs,
+    //     tvecs,
+    //     false,
+    //     cv::SOLVEPNP_SQPNP);
 
     result.candidate_count = solutions;
 
@@ -328,6 +338,9 @@ PoseResult PoseEstimator::estimate(
         cv::Rodrigues(rvec, Rmat);
         const cv::Matx33d R = mat_to_matx33d(Rmat);
 
+        auto &candidate = best.candidates.at(static_cast<std::size_t>(i));
+        candidate.position_mm = tvec;
+
         // All physical LEDs must lie in front of the camera.
         bool positive_depth = true;
         for (const auto &p : object_points_centered_) {
@@ -341,16 +354,16 @@ PoseResult PoseEstimator::estimate(
         }
 
         if (!positive_depth)
-            continue;
-
+            candidate.rejection_flags |= RejectDepth;
+        // Preserve the uploaded estimator's raw marker-to-camera RPY.
         const cv::Vec3d rpy = rotation_to_rpy_deg(R);
-
-        if (!within(rpy[0], config_.roll_deg) ||
-            !within(rpy[1], config_.pitch_deg) ||
-            !within(rpy[2], config_.yaw_deg))
-        {
-            continue;
-        }
+        candidate.rpy_deg = rpy;
+        if (!within(rpy[0], config_.roll_deg))
+            candidate.rejection_flags |= RejectRoll;
+        if (!within(rpy[1], config_.pitch_deg))
+            candidate.rejection_flags |= RejectPitch;
+        if (!within(rpy[2], config_.yaw_deg))
+            candidate.rejection_flags |= RejectYaw;
 
         std::vector<cv::Point2d> projected;
         cv::projectPoints(
@@ -368,8 +381,9 @@ PoseResult PoseEstimator::estimate(
         }
 
         const double reproj_rms = std::sqrt(sum_sq / 3.0);
+        candidate.reprojection_rms_px = reproj_rms;
         if (reproj_rms > config_.max_reprojection_rms_px)
-            continue;
+            candidate.rejection_flags |= RejectFit;
 
         double translation_jump = 0.0;
         double rotation_jump = 0.0;
@@ -381,15 +395,29 @@ PoseResult PoseEstimator::estimate(
             if (config_.max_translation_jump_mm > 0.0 &&
                 translation_jump > config_.max_translation_jump_mm)
             {
-                continue;
+                candidate.rejection_flags |= RejectTranslation;
             }
 
             if (config_.max_rotation_jump_deg > 0.0 &&
                 rotation_jump > config_.max_rotation_jump_deg)
             {
-                continue;
+                candidate.rejection_flags |= RejectRotation;
             }
         }
+
+        candidate.translation_jump_mm = translation_jump;
+        candidate.rotation_jump_deg = rotation_jump;
+        for (int axis = 0; axis < 3; ++axis) {
+            if (!std::isfinite(tvec[axis]) || !std::isfinite(rpy[axis]))
+                candidate.rejection_flags |= RejectNonfinite;
+        }
+        if (!std::isfinite(reproj_rms) ||
+            !std::isfinite(translation_jump) || !std::isfinite(rotation_jump))
+            candidate.rejection_flags |= RejectNonfinite;
+
+        // Retain diagnostics even when one or more gates reject this pose.
+        if (candidate.rejection_flags != 0)
+            continue;
 
         ++accepted;
 
@@ -404,6 +432,7 @@ PoseResult PoseEstimator::estimate(
         best_cost = cost;
 
         best.valid = true;
+        best.selected_candidate = i;
         best.position_mm = tvec;
         best.rvec = rvec;
         best.rpy_deg = rpy;

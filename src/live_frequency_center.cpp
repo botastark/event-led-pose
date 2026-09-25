@@ -97,17 +97,6 @@ constexpr std::uint32_t CANDIDATE_TIMEOUT_US = 20000;
 // Opposite-transition half-period tolerance.
 constexpr std::uint32_t CROSS_TOLERANCE_PERMILLE = 10; // 1%
 
-// Robustness thresholds:
-//
-// Strong case:
-//   at least one valid OFF->ON full-period interval AND
-//   at least one valid ON->OFF full-period interval.
-//
-// Fallback case:
-//   2 valid full-period intervals from one transition direction
-//   when the other polarity is weak/missing.
-
-
 // TINY PER-POLARITY INTERVAL RING
 // ============================================================
 //
@@ -954,10 +943,11 @@ int main(int argc, char **argv) {
 
                     const PoseResult pose =
                         pose_estimator->estimate(snapshot);
-                    viewer->submit_pose(pose);
-
                     if (!pose.valid)
                         continue;
+                    viewer->submit_pose(pose);
+
+                    
                 }
             });
         }

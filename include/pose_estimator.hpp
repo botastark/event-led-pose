@@ -10,6 +10,21 @@
 
 namespace event_led_pose {
 
+enum PoseRejection : unsigned {
+    RejectDepth = 1u, RejectRoll = 2u, RejectPitch = 4u,
+    RejectYaw = 8u, RejectFit = 16u, RejectTranslation = 32u,
+    RejectRotation = 64u, RejectNonfinite = 128u
+};
+
+struct PoseCandidate {
+    cv::Vec3d position_mm{0.0, 0.0, 0.0};
+    cv::Vec3d rpy_deg{0.0, 0.0, 0.0};
+    double reprojection_rms_px = 0.0;
+    double translation_jump_mm = 0.0;
+    double rotation_jump_deg = 0.0;
+    unsigned rejection_flags = 0;
+};
+
 struct PoseResult {
     bool valid = false;
 
@@ -27,6 +42,10 @@ struct PoseResult {
 
     int candidate_count = 0;
     int accepted_candidate_count = 0;
+    // P3P returns at most four solutions. Indices are frame-local,
+    // not persistent identities across frames.
+    std::array<PoseCandidate, 4> candidates{};
+    int selected_candidate = -1;
 
     std::uint32_t timestamp_us = 0;
 };

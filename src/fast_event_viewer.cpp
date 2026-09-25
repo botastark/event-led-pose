@@ -155,6 +155,9 @@ std::array<std::uint8_t, 7> glyph_rows(char c) noexcept {
     case 'T': return G{0x1f,0x04,0x04,0x04,0x04,0x04,0x04};
     case 'U': return G{0x11,0x11,0x11,0x11,0x11,0x11,0x0e};
     case 'V': return G{0x11,0x11,0x11,0x11,0x11,0x0a,0x04};
+    case 'W': return G{0x11,0x11,0x11,0x15,0x15,0x15,0x0a};
+    case 'e': return G{0x00,0x00,0x0e,0x11,0x1f,0x10,0x0e};
+    case '+': return G{0x00,0x04,0x04,0x1f,0x04,0x04,0x00};
     case 'X': return G{0x11,0x11,0x0a,0x04,0x0a,0x11,0x11};
     case 'Y': return G{0x11,0x11,0x0a,0x04,0x04,0x04,0x04};
     case 'Z': return G{0x1f,0x01,0x02,0x04,0x08,0x10,0x1f};
@@ -171,6 +174,7 @@ std::array<std::uint8_t, 7> glyph_rows(char c) noexcept {
     case '-': return G{0x00,0x00,0x00,0x1f,0x00,0x00,0x00};
     case '.': return G{0x00,0x00,0x00,0x00,0x00,0x0c,0x0c};
     case '/': return G{0x01,0x01,0x02,0x04,0x08,0x10,0x10};
+    case ':': return G{0x00,0x0c,0x0c,0x00,0x0c,0x0c,0x00};
     default:  return G{0x00,0x00,0x00,0x00,0x00,0x00,0x00};
     }
 }
@@ -1308,8 +1312,7 @@ void FastEventViewer::draw_pose_overlay(
         return;
     }
 
-    const int scale = std::clamp(cfg_.pose_text_scale, 1, 4);
-    std::array<std::string, 4> lines;
+    std::vector<std::string> lines(4);
 
     if (displayed_pose_.valid) {
         std::ostringstream position;
@@ -1349,9 +1352,57 @@ void FastEventViewer::draw_pose_overlay(
                << displayed_pose_.candidate_count;
     lines[3] = candidates.str();
 
+    for (int i = 0; i < displayed_pose_.candidate_count && i < 4; ++i) {
+        const auto &c = displayed_pose_.candidates[static_cast<std::size_t>(i)];
+        std::ostringstream angles;
+        angles << std::fixed << std::setprecision(1)
+               << "CANDIDATE " << (i + 1)
+               << ": R: " << c.rpy_deg[0]
+               << " P: " << c.rpy_deg[1]
+               << " Y: " << c.rpy_deg[2] << " DEG";
+        lines.push_back(angles.str());
+        std::ostringstream row;
+        row << " STATUS: ";
+        if (i == displayed_pose_.selected_candidate)
+            row << "SELECTED";
+        else if (c.rejection_flags == 0)
+            row << "ACCEPTED";
+        else {
+            row << "REJECT";
+            if (c.rejection_flags & RejectDepth) row << " DEPTH";
+            if (c.rejection_flags & RejectRoll) row << " ROLL";
+            if (c.rejection_flags & RejectPitch) row << " PITCH";
+            if (c.rejection_flags & RejectYaw) row << " YAW";
+            if (c.rejection_flags & RejectFit) row << " FIT";
+            if (c.rejection_flags & RejectTranslation) row << " T-JUMP";
+            if (c.rejection_flags & RejectRotation) row << " R-JUMP";
+            if (c.rejection_flags & RejectNonfinite) row << " NONFINITE";
+        }
+        lines.push_back(row.str());
+        std::ostringstream values;
+        values << std::fixed << std::setprecision(1)
+               << " XYZ MM " << c.position_mm[0] << " "
+               << c.position_mm[1] << " " << c.position_mm[2];
+        lines.push_back(values.str());
+        std::ostringstream metrics;
+        metrics << " FIT PX " << std::uppercase << std::scientific << std::setprecision(1)
+                << c.reprojection_rms_px << std::fixed << std::setprecision(2)
+                << " JUMP MM " << c.translation_jump_mm
+                << " DEG " << c.rotation_jump_deg;
+        lines.push_back(metrics.str());
+    }
+
     std::size_t longest = 0;
     for (const auto &line : lines)
         longest = std::max(longest, line.size());
+
+    // Fit the candidate table to resized windows where possible.
+    const int width_scale = (framebuffer_width - 32) /
+        std::max(1, static_cast<int>(longest) * 6);
+    const int height_scale = (sensor_view_height - 32) /
+        std::max(1, static_cast<int>(lines.size()) * 9);
+    const int scale = std::max(1, std::min({
+        std::clamp(cfg_.pose_text_scale, 1, 4), width_scale, height_scale}));
 
     const float left_px = 10.0f;
     const float top_px = 10.0f;

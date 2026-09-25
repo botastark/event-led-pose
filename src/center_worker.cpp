@@ -1,5 +1,4 @@
 #include "center_worker.hpp"
-
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
@@ -352,7 +351,7 @@ CenterWorker::compute_frequency_stats(
     // Exact p95 without sorting the entire vector.
     const std::size_t p95_index =
         static_cast<std::size_t>(
-            0.95 *
+            0.9 *
             static_cast<double>(
                 n - 1));
 
@@ -367,9 +366,8 @@ CenterWorker::compute_frequency_stats(
 
     result.p95_radius =
         radial_scratch_[p95_index];
-
     result.valid = true;
-
+    
     return result;
 }
 
