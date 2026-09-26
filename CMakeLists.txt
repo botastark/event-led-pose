@@ -73,26 +73,58 @@ target_compile_options(
     -march=native
 )
 
-add_library(pose_estimator
+add_library(
+    pose_estimator
     src/pose_estimator.cpp
 )
 
-target_include_directories(pose_estimator
+target_include_directories(
+    pose_estimator
     PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${OpenCV_INCLUDE_DIRS}
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${OpenCV_INCLUDE_DIRS}
 )
 
-target_link_libraries(pose_estimator
+target_link_libraries(
+    pose_estimator
     PUBLIC
-        ${OpenCV_LIBS}
+    ${OpenCV_LIBS}
 )
 
-target_link_libraries(fast_event_viewer
+target_link_libraries(
+    fast_event_viewer
     PUBLIC
-        pose_estimator
+    pose_estimator
 )
 
+add_library(
+    task_pose_protocol
+    src/task_pose_protocol.cpp
+)
+
+target_include_directories(
+    task_pose_protocol
+    PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+add_library(
+    task_pose_sender
+    src/task_pose_sender.cpp
+)
+
+target_include_directories(
+    task_pose_sender
+    PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(
+    task_pose_sender
+    PUBLIC
+    task_pose_protocol
+    pose_estimator
+)
 
 add_executable(
     live_frequency_center
@@ -113,6 +145,7 @@ target_link_libraries(
     fast_event_viewer
     center_worker
     pose_estimator
+    task_pose_sender
 )
 
 target_compile_options(

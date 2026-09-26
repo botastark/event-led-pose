@@ -1,0 +1,85 @@
+%YAML:1.0
+---
+camera:
+  fx: 790.51326710114199
+  fy: 789.77590081736548
+  cx: 620.22014356450097
+  cy: 355.44604805553314
+  dist:
+    [
+      -0.42369512847960716,
+      0.2356880677633155,
+      0.0011048684463981296,
+      -0.00066673988736448751,
+      -0.072810127784550788,
+    ]
+led_points_mm:
+  "165": [-80.0, 100.0, 0.0]
+  "366": [80.0, 100.0, 0.0]
+  "596": [0.0, 0.0, 0.0]
+quality:
+  min_samples: 8
+  max_p95_radius_px: 80
+  max_reprojection_rms_px: 5
+angle_limits_deg:
+  roll: [-60, 60]
+  pitch: [-60, 60]
+  yaw: [-180, 180]
+continuity:
+  max_translation_jump_mm: 250
+  max_rotation_jump_deg: 45
+  translation_cost_per_mm: 0.01
+  rotation_cost_per_deg: 0.050000000000000003
+checkerboard_calibration:
+  camera_serial: "00050946"
+  image_width: 1280
+  image_height: 720
+  checkerboard_columns: 9
+  checkerboard_rows: 6
+  square_size_m: 0.038830000907182693
+  original_sample_count: 55
+  accepted_sample_count: 20
+  rejected_sample_count: 35
+  max_view_error_px: 0.80000000000000004
+  rms: 2.0933123994396574
+  mean_reprojection_error: 2.0933127229956323
+  accepted_original_sample_indices:
+    [1, 2, 3, 4, 6, 7, 15, 27, 30, 34, 35, 36, 37, 39, 40, 44, 46, 47, 49, 50]
+  rejected_original_sample_indices:
+    [
+      26,
+      23,
+      29,
+      32,
+      42,
+      41,
+      24,
+      54,
+      17,
+      28,
+      10,
+      19,
+      33,
+      18,
+      22,
+      13,
+      12,
+      16,
+      25,
+      11,
+      31,
+      53,
+      51,
+      55,
+      20,
+      43,
+      45,
+      52,
+      38,
+      5,
+      14,
+      9,
+      48,
+      8,
+      21,
+    ]

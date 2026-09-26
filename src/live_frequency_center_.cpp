@@ -3,7 +3,6 @@
 #include "packed_event.hpp"
 #include "spsc_ring.hpp"
 #include "pose_estimator.hpp"
-#include "task_pose_sender.h"
 
 #include <metavision/sdk/base/events/event_cd.h>
 #include <metavision/sdk/stream/camera.h>
@@ -502,12 +501,6 @@ struct Options {
 
     // Optional calibrated P3P pose estimation.
     std::string pose_config_path;
-
-    // Optional PTP2 tracker-pose publication.
-    // The wire payload is semantically T_CT:
-    // target/triangle frame T expressed in camera frame C.
-    std::string task_pose_ip;
-    std::uint16_t task_pose_port = 5000;
 };
 
 Options parse_args(int argc, char **argv) {
@@ -610,26 +603,6 @@ Options parse_args(int argc, char **argv) {
 
             o.pose_config_path = argv[i];
         }
-        else if (a == "--task-pose-ip") {
-            if (++i >= argc)
-                throw std::runtime_error("--task-pose-ip needs IPv4 address");
-
-            o.task_pose_ip = argv[i];
-        }
-        else if (a == "--task-pose-port") {
-            if (++i >= argc)
-                throw std::runtime_error("--task-pose-port needs value");
-
-            const unsigned long port =
-                std::stoul(argv[i]);
-
-            if (port == 0 || port > 65535)
-                throw std::runtime_error(
-                    "--task-pose-port must be in [1,65535]");
-
-            o.task_pose_port =
-                static_cast<std::uint16_t>(port);
-        }
         else if (a == "--help" || a == "-h") {
             std::cout
                 << "Usage: live_frequency_center [options]\n"
@@ -647,9 +620,7 @@ Options parse_args(int argc, char **argv) {
                 << "  --no-histograms\n"
                 << "  --bias-config FILE.json\n"
                 << "  --print-biases\n"
-                << "  --pose-config FILE.yml\n"
-                << "  --task-pose-ip IPV4\n"
-                << "  --task-pose-port PORT       (default 5000)\n";
+                << "  --pose-config FILE.json\n";
 
             std::exit(0);
         }
@@ -823,28 +794,6 @@ int main(int argc, char **argv) {
                 << "\n";
         }
 
-        std::unique_ptr<panda_tracker::TaskPoseSender>
-            task_pose_sender;
-
-        if (!options.task_pose_ip.empty()) {
-            if (!pose_estimator) {
-                throw std::runtime_error(
-                    "Tracker-pose sending requires --pose-config.");
-            }
-
-            task_pose_sender =
-                std::make_unique<panda_tracker::TaskPoseSender>(
-                    options.task_pose_ip,
-                    options.task_pose_port);
-
-            std::cout
-                << "Tracker T_CT PTP2 UDP: "
-                << options.task_pose_ip
-                << ":"
-                << options.task_pose_port
-                << "\n";
-        }
-
         Camera camera =
             Camera::from_first_available();
 
@@ -994,18 +943,11 @@ int main(int argc, char **argv) {
 
                     const PoseResult pose =
                         pose_estimator->estimate(snapshot);
+                    if (!pose.valid)
+                        continue;
+                    viewer->submit_pose(pose);
 
-                    // Viewer is optional. Submit invalid results too so
-                    // pose loss is reflected immediately.
-                    if (viewer)
-                        viewer->submit_pose(pose);
-
-                    // Publish every new T_CT state. Invalid estimates are
-                    // sent as valid=false packets, allowing immediate
-                    // receiver-side gating.
-                    if (task_pose_sender)
-                        task_pose_sender->send(pose);
-
+                    
                 }
             });
         }
@@ -1329,17 +1271,6 @@ int main(int argc, char **argv) {
             std::cout
                 << "  CSV file        : "
                 << options.stats_csv_path
-                << "\n";
-        }
-
-        if (task_pose_sender) {
-            std::cout
-                << "\nTask-pose UDP\n"
-                << "  packets sent    : "
-                << task_pose_sender->sent_count()
-                << "\n"
-                << "  local drops     : "
-                << task_pose_sender->dropped_count()
                 << "\n";
         }
 

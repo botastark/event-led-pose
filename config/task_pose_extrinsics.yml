@@ -1,0 +1,17 @@
+%YAML:1.0
+---
+# REPLACE THIS MATRIX with your calibrated T_CS before robot use.
+#
+# T_XY maps coordinates from Y into X.
+# T_CS therefore maps stick-tip frame S into camera frame C.
+# Translation MUST be in metres.
+#
+# Identity below is only a placeholder.
+T_CS: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: d
+   data: [ 1.0, 0.0, 0.0, 0.0,
+           0.0, 1.0, 0.0, 0.0,
+           0.0, 0.0, 1.0, 0.0,
+           0.0, 0.0, 0.0, 1.0 ]
