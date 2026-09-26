@@ -351,7 +351,7 @@ CenterWorker::compute_frequency_stats(
     // Exact p95 without sorting the entire vector.
     const std::size_t p95_index =
         static_cast<std::size_t>(
-            0.9 *
+            0.95 *
             static_cast<double>(
                 n - 1));
 

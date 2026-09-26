@@ -10,12 +10,16 @@
 #include <metavision/hal/facilities/i_ll_biases.h>
 
 #include <array>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <fstream>
+#include <filesystem>
+#include <iomanip>
+#include <cmath>
 #include <regex>
 #include <sstream>
 #include <memory>
@@ -214,6 +218,13 @@ struct Result {
     std::uint8_t id = NO_CANDIDATE;
 };
 
+// Diagnostic state is allocated only for explicitly selected pixels.
+struct DecisionTrace {
+    const char *reason = "unclassified";
+    std::uint32_t dt_us = 0;
+    bool timed_out = false;
+};
+
 
 // ============================================================
 // INTEGER MATCHING
@@ -308,11 +319,14 @@ inline int ring_matches(const IntervalRing2 &ring,
 
 inline Result process_event(PixelState &s,
                             bool polarity,
-                            std::uint32_t now) noexcept {
+                            std::uint32_t now,
+                            DecisionTrace *trace = nullptr) noexcept {
     Result out;
+    if (trace) *trace = {};
 
     // Actually enforce candidate timeout before using this event.
     if (candidate_timed_out(s, now)) {
+        if (trace) trace->timed_out = true;
         reset_candidate(s);
     }
 
@@ -332,8 +346,10 @@ inline Result process_event(PixelState &s,
         const std::uint32_t dt =
             now - last_same;
 
-        if (dt < BURST_MERGE_US)
+        if (dt < BURST_MERGE_US) {
+            if (trace) { trace->reason = "burst"; trace->dt_us = dt; }
             return out;
+        }
     }
 
     // --------------------------------------------------------
@@ -345,14 +361,19 @@ inline Result process_event(PixelState &s,
 
     last_same = now;
 
-    if (previous_same == 0)
+    if (previous_same == 0) {
+        if (trace) trace->reason = "first_polarity_event";
         return out;
+    }
 
     const std::uint32_t dt =
         now - previous_same;
+    if (trace) trace->dt_us = dt;
 
-    if (dt > MAX_STORED_DT_US)
+    if (dt > MAX_STORED_DT_US) {
+        if (trace) trace->reason = "interval_too_long";
         return out;
+    }
 
     // First use the active candidate if there is one.
     // This is the fast steady-state path.
@@ -361,6 +382,7 @@ inline Result process_event(PixelState &s,
             FREQ[s.candidate];
 
         if (match_same_transition_period(dt, f)) {
+            if (trace) trace->reason = "candidate_match";
             period_ring.push(
                 static_cast<std::uint16_t>(dt));
 
@@ -372,6 +394,7 @@ inline Result process_event(PixelState &s,
                 s.fall_periods.count_nonzero() >= 2;
 
             if (robust) {
+                if (trace) trace->reason = "passed";
                 out.passed = true;
                 out.id = s.candidate;
             }
@@ -394,6 +417,7 @@ inline Result process_event(PixelState &s,
         if (other != NO_CANDIDATE &&
             other != s.candidate)
         {
+            if (trace) trace->reason = "candidate_switch";
             s.rise_periods = {};
             s.fall_periods = {};
 
@@ -414,6 +438,7 @@ inline Result process_event(PixelState &s,
             reset_candidate(s);
         }
 
+        if (trace) trace->reason = "candidate_mismatch";
         return out;
     }
 
@@ -429,8 +454,11 @@ inline Result process_event(PixelState &s,
     const std::uint8_t id =
         classify_interval(dt);
 
-    if (id == NO_CANDIDATE)
+    if (id == NO_CANDIDATE) {
+        if (trace) trace->reason = "no_frequency_match";
         return out;
+    }
+    if (trace) trace->reason = "acquired";
 
     s.candidate = id;
     s.last_support_tick =
@@ -451,6 +479,13 @@ inline Result process_event(PixelState &s,
 // ============================================================
 
 struct Options {
+    std::string input_raw;
+    std::string record_raw;
+    std::string pixel_trace_csv;
+    std::vector<std::pair<std::uint16_t, std::uint16_t>> trace_pixels;
+    bool trace_follow_centers = false;
+    int trace_margin_px = 8;
+    int trace_patch_px = 2;
     bool visualize = false;
     bool show_raw = false;
 
@@ -518,6 +553,27 @@ Options parse_args(int argc, char **argv) {
 
         if (a == "--visualize") {
             o.visualize = true;
+        }
+        else if (a == "--input-raw" || a == "--record-raw" || a == "--pixel-trace") {
+            if (++i >= argc) throw std::runtime_error(a + " needs path");
+            if (a == "--input-raw") o.input_raw = argv[i];
+            else if (a == "--record-raw") o.record_raw = argv[i];
+            else o.pixel_trace_csv = argv[i];
+        }
+        else if (a == "--trace-pixel") {
+            if (i + 2 >= argc) throw std::runtime_error("--trace-pixel needs X Y");
+            const auto x = std::stoul(argv[++i]);
+            const auto y = std::stoul(argv[++i]);
+            if (x > 65535 || y > 65535) throw std::runtime_error("Pixel coordinate out of range");
+            o.trace_pixels.emplace_back(x, y);
+        }
+        else if (a == "--trace-follow-centers") o.trace_follow_centers = true;
+        else if (a == "--trace-margin-px" || a == "--trace-patch-px") {
+            if (++i >= argc) throw std::runtime_error(a + " needs pixels");
+            const int value = std::stoi(argv[i]);
+            if (value < 0 || value > 1000) throw std::runtime_error(a + " must be in [0,1000]");
+            if (a == "--trace-margin-px") o.trace_margin_px = value;
+            else o.trace_patch_px = value;
         }
         else if (a == "--show-raw") {
             o.show_raw = true;
@@ -634,6 +690,13 @@ Options parse_args(int argc, char **argv) {
             std::cout
                 << "Usage: live_frequency_center [options]\n"
                 << "  --visualize\n"
+                << "  --record-raw FILE.raw    Record all camera events\n"
+                << "  --input-raw FILE.raw     Replay with this classifier\n"
+                << "  --trace-pixel X Y        Repeat for each inspected pixel\n"
+                << "  --trace-follow-centers   Track each LED center and an outside-r95 patch\n"
+                << "  --trace-margin-px N      Extra gap past r95 (default 8)\n"
+                << "  --trace-patch-px N       Half-width of sampled patches (default 2)\n"
+                << "  --pixel-trace FILE.csv   Per-event decisions for inspected pixels\n"
                 << "  --show-raw\n"
                 << "  --display-fps N\n"
                 << "  --persistence-us N\n"
@@ -658,6 +721,13 @@ Options parse_args(int argc, char **argv) {
                 "Unknown argument: " + a);
         }
     }
+
+    if (!o.input_raw.empty() && !o.record_raw.empty())
+        throw std::runtime_error("Cannot record and replay simultaneously");
+    if ((o.trace_pixels.empty() && !o.trace_follow_centers) != o.pixel_trace_csv.empty())
+        throw std::runtime_error("Use --pixel-trace with --trace-pixel or --trace-follow-centers");
+    if (!o.record_raw.empty() && std::filesystem::exists(o.record_raw))
+        throw std::runtime_error("Recording already exists: " + o.record_raw);
 
     return o;
 }
@@ -845,8 +915,9 @@ int main(int argc, char **argv) {
                 << "\n";
         }
 
-        Camera camera =
-            Camera::from_first_available();
+        Camera camera = options.input_raw.empty()
+            ? Camera::from_first_available()
+            : Camera::from_file(options.input_raw);
 
         // Biases are applied before camera.start(), so irrelevant sensor
         // activity can be reduced before events reach the host filter.
@@ -877,6 +948,11 @@ int main(int argc, char **argv) {
 
         const int height =
             geometry.get_height();
+
+        for (const auto &pixel : options.trace_pixels) {
+            if (pixel.first >= width || pixel.second >= height)
+                throw std::runtime_error("Trace pixel outside camera geometry");
+        }
 
         std::cout
             << "Camera: "
@@ -1037,6 +1113,25 @@ int main(int argc, char **argv) {
         // ----------------------------------------------------
 
         std::thread filter_thread([&] {
+            struct TraceSite {
+                int x, y, frequency;
+                const char *kind;
+                float cx, cy, r95;
+            };
+            std::vector<TraceSite> sites;
+            std::uint64_t trace_center_version = 0;
+            CenterSnapshot trace_centers;
+            std::uint64_t trace_rows = 0;
+            std::uint64_t trace_valid_snapshots = 0;
+            auto last_trace_report = std::chrono::steady_clock::now();
+            auto last_trace_flush = last_trace_report;
+            std::ofstream pixel_trace;
+            if (!options.pixel_trace_csv.empty()) {
+                pixel_trace.open(options.pixel_trace_csv);
+                if (!pixel_trace) throw std::runtime_error("Cannot open pixel trace CSV");
+                pixel_trace << "t_us,x,y,polarity,dt_same_us,reason,timed_out,candidate_before,candidate_after,rise_dt0,rise_dt1,fall_dt0,fall_dt1,passed,classified_hz,target_hz,site,site_x,site_y,center_x,center_y,r95_px\n";
+                pixel_trace.flush();
+            }
             std::vector<PixelState> pixels(
                 static_cast<std::size_t>(width)
                 * static_cast<std::size_t>(height));
@@ -1068,7 +1163,7 @@ int main(int argc, char **argv) {
 
                 // Freshness over completeness:
                 // never replay seconds of old events.
-                if (backlog >
+                if (options.input_raw.empty() && backlog >
                     options.max_filter_backlog_events)
                 {
                     const std::uint64_t skip =
@@ -1083,6 +1178,31 @@ int main(int argc, char **argv) {
                     viewer->freq_begin_batch();
 
                 center_worker.begin_batch();
+
+                // A center snapshot is based on previous batches. Sampling
+                // must never feed back into the classifier for this batch.
+                if (options.trace_follow_centers &&
+                    center_store.copy_if_new(trace_center_version, trace_centers)) {
+                    ++trace_valid_snapshots;
+                    sites.clear();
+                    for (int id = 0; id < 3; ++id) {
+                        const auto &c = trace_centers.frequency[id];
+                        if (!c.valid) continue;
+                        const int cx = static_cast<int>(std::lround(c.x));
+                        const int cy = static_cast<int>(std::lround(c.y));
+                        if (cx < 0 || cx >= width || cy < 0 || cy >= height) continue;
+                        const int f = id == 0 ? 165 : id == 1 ? 366 : 596;
+                        sites.push_back({cx, cy, f, "center", c.x, c.y, c.p95_radius});
+                        const int gap = static_cast<int>(std::ceil(c.p95_radius)) +
+                            options.trace_margin_px + options.trace_patch_px + 1;
+                        int outside_x = cx + gap;
+                        if (outside_x + options.trace_patch_px >= width)
+                            outside_x = cx - gap;
+                        if (outside_x - options.trace_patch_px >= 0 &&
+                            outside_x + options.trace_patch_px < width)
+                            sites.push_back({outside_x, cy, f, "outside", c.x, c.y, c.p95_radius});
+                    }
+                }
 
                 for (std::uint64_t seq = tail;
                      seq < head;
@@ -1110,11 +1230,43 @@ int main(int argc, char **argv) {
                             + static_cast<std::size_t>(x)
                         ];
 
-                    const Result r =
-                        process_event(
-                            state,
-                            p,
-                            t);
+                    const bool selected = pixel_trace &&
+                        (std::find(options.trace_pixels.begin(), options.trace_pixels.end(),
+                                   std::make_pair(x, y)) != options.trace_pixels.end() ||
+                         std::any_of(sites.begin(), sites.end(), [&](const TraceSite &site) {
+                             return std::abs(static_cast<int>(x) - site.x) <= options.trace_patch_px &&
+                                    std::abs(static_cast<int>(y) - site.y) <= options.trace_patch_px;
+                         }));
+                    DecisionTrace decision;
+                    const auto before = state.candidate;
+                    const Result r = process_event(state, p, t,
+                                                    selected ? &decision : nullptr);
+                    if (selected) {
+                        auto label = [](std::uint8_t id) -> int {
+                            return id == NO_CANDIDATE ? 0 : (id == 0 ? 165 : id == 1 ? 366 : 596);
+                        };
+                        const auto write_row = [&](int target, const char *kind,
+                                                   int sx, int sy, float cx, float cy, float r95) {
+                            pixel_trace << t << ',' << x << ',' << y << ',' << (p ? 1 : 0)
+                                << ',' << decision.dt_us << ',' << decision.reason << ','
+                                << (decision.timed_out ? 1 : 0) << ',' << label(before)
+                                << ',' << label(state.candidate) << ','
+                                << state.rise_periods.dt0 << ',' << state.rise_periods.dt1 << ','
+                                << state.fall_periods.dt0 << ',' << state.fall_periods.dt1 << ','
+                                << (r.passed ? 1 : 0) << ',' << label(r.id) << ','
+                                << target << ',' << kind << ',' << sx << ',' << sy << ','
+                                << cx << ',' << cy << ',' << r95 << '\n';
+                            ++trace_rows;
+                        };
+                        if (std::find(options.trace_pixels.begin(), options.trace_pixels.end(),
+                                      std::make_pair(x, y)) != options.trace_pixels.end())
+                            write_row(0, "fixed", x, y, 0, 0, 0);
+                        for (const auto &site : sites)
+                            if (std::abs(static_cast<int>(x) - site.x) <= options.trace_patch_px &&
+                                std::abs(static_cast<int>(y) - site.y) <= options.trace_patch_px)
+                                write_row(site.frequency, site.kind, site.x, site.y,
+                                          site.cx, site.cy, site.r95);
+                    }
 
                     if (r.passed) {
                         ++local_passed;
@@ -1148,6 +1300,21 @@ int main(int argc, char **argv) {
 
                 center_worker.end_batch();
 
+                if (pixel_trace) {
+                    const auto now = std::chrono::steady_clock::now();
+                    if (now - last_trace_flush >= std::chrono::milliseconds(100)) {
+                        pixel_trace.flush();
+                        last_trace_flush = now;
+                    }
+                    if (now - last_trace_report >= std::chrono::seconds(1)) {
+                        std::cerr << "Trace: " << trace_rows << " rows, "
+                                  << trace_valid_snapshots << " center snapshots, "
+                                  << sites.size() << " active sites; passed "
+                                  << local_passed << " events\n";
+                        last_trace_report = now;
+                    }
+                }
+
                 filter_input.consumer_commit(head);
             }
 
@@ -1163,6 +1330,12 @@ int main(int argc, char **argv) {
                 freq_counts[i].store(
                     local_counts[i],
                     std::memory_order_relaxed);
+            }
+            if (pixel_trace) {
+                pixel_trace.flush();
+                std::cerr << "Trace final: " << trace_rows << " rows, "
+                          << trace_valid_snapshots << " center snapshots, "
+                          << sites.size() << " active sites\n";
             }
         });
 
@@ -1195,6 +1368,7 @@ int main(int argc, char **argv) {
                 }
 
                 std::uint64_t local_drops = 0;
+                std::uint32_t unpublished_events = 0;
 
                 for (const EventCD *ev = begin;
                      ev != end;
@@ -1209,9 +1383,23 @@ int main(int argc, char **argv) {
                                 std::uint32_t>(
                                 ev->t));
 
-                    if (!filter_input
-                            .producer_push(pe))
-                    {
+                    if (!options.input_raw.empty()) {
+                        // Publish partial callback batches. Otherwise a RAW
+                        // decoder callback larger than the ring can fill its
+                        // unpublished portion and wait forever: the consumer
+                        // cannot see those events until producer_end().
+                        while (!filter_input.producer_push(pe)) {
+                            filter_input.producer_end();
+                            unpublished_events = 0;
+                            std::this_thread::yield();
+                            filter_input.producer_begin();
+                        }
+                        if (++unpublished_events >= 8192) {
+                            filter_input.producer_end();
+                            filter_input.producer_begin();
+                            unpublished_events = 0;
+                        }
+                    } else if (!filter_input.producer_push(pe)) {
                         ++local_drops;
                     }
 
@@ -1242,7 +1430,11 @@ int main(int argc, char **argv) {
                     std::memory_order_relaxed);
             });
 
-        camera.start();
+        if (!camera.start()) throw std::runtime_error("Camera stream did not start");
+        if (!options.record_raw.empty() && !camera.start_recording(options.record_raw)) {
+            camera.stop();
+            throw std::runtime_error("Could not start RAW recording");
+        }
 
         if (viewer) {
             std::cout
@@ -1254,12 +1446,19 @@ int main(int argc, char **argv) {
         else {
             std::cout
                 << "Parallel transition-ring filter + center worker running.\n"
-                << "Press ENTER to stop.\n";
+                << (options.input_raw.empty() ? "Press ENTER to stop.\n" : "Replaying RAW file to end.\n");
 
-            std::cin.get();
+            if (options.input_raw.empty()) std::cin.get();
+            else while (camera.is_running())
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
 
+        if (!options.record_raw.empty()) camera.stop_recording(options.record_raw);
         camera.stop();
+        if (!options.input_raw.empty()) {
+            while (filter_input.consumer_tail() != filter_input.consumer_head())
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
 
         stop.store(
             true,
