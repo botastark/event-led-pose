@@ -9,8 +9,6 @@
 #include <metavision/sdk/stream/camera.h>
 #include <metavision/hal/facilities/i_ll_biases.h>
 
-#include <opencv2/calib3d.hpp>
-
 #include <array>
 #include <algorithm>
 #include <atomic>
@@ -21,7 +19,6 @@
 #include <fstream>
 #include <filesystem>
 #include <iomanip>
-#include <cmath>
 #include <regex>
 #include <sstream>
 #include <memory>
@@ -485,9 +482,6 @@ struct Options {
     std::string record_raw;
     std::string pixel_trace_csv;
     std::vector<std::pair<std::uint16_t, std::uint16_t>> trace_pixels;
-    bool trace_follow_centers = false;
-    int trace_margin_px = 8;
-    int trace_patch_px = 2;
     bool visualize = false;
     bool show_raw = false;
 
@@ -568,14 +562,6 @@ Options parse_args(int argc, char **argv) {
             const auto y = std::stoul(argv[++i]);
             if (x > 65535 || y > 65535) throw std::runtime_error("Pixel coordinate out of range");
             o.trace_pixels.emplace_back(x, y);
-        }
-        else if (a == "--trace-follow-centers") o.trace_follow_centers = true;
-        else if (a == "--trace-margin-px" || a == "--trace-patch-px") {
-            if (++i >= argc) throw std::runtime_error(a + " needs pixels");
-            const int value = std::stoi(argv[i]);
-            if (value < 0 || value > 1000) throw std::runtime_error(a + " must be in [0,1000]");
-            if (a == "--trace-margin-px") o.trace_margin_px = value;
-            else o.trace_patch_px = value;
         }
         else if (a == "--show-raw") {
             o.show_raw = true;
@@ -695,9 +681,6 @@ Options parse_args(int argc, char **argv) {
                 << "  --record-raw FILE.raw    Record all camera events\n"
                 << "  --input-raw FILE.raw     Replay with this classifier\n"
                 << "  --trace-pixel X Y        Repeat for each inspected pixel\n"
-                << "  --trace-follow-centers   Track each LED center and an outside-r95 patch\n"
-                << "  --trace-margin-px N      Extra gap past r95 (default 8)\n"
-                << "  --trace-patch-px N       Half-width of sampled patches (default 2)\n"
                 << "  --pixel-trace FILE.csv   Per-event decisions for inspected pixels\n"
                 << "  --show-raw\n"
                 << "  --display-fps N\n"
@@ -726,8 +709,8 @@ Options parse_args(int argc, char **argv) {
 
     if (!o.input_raw.empty() && !o.record_raw.empty())
         throw std::runtime_error("Cannot record and replay simultaneously");
-    if ((o.trace_pixels.empty() && !o.trace_follow_centers) != o.pixel_trace_csv.empty())
-        throw std::runtime_error("Use --pixel-trace with --trace-pixel or --trace-follow-centers");
+    if (o.trace_pixels.empty() != o.pixel_trace_csv.empty())
+        throw std::runtime_error("Use --trace-pixel and --pixel-trace together");
     if (!o.record_raw.empty() && std::filesystem::exists(o.record_raw))
         throw std::runtime_error("Recording already exists: " + o.record_raw);
 
@@ -880,54 +863,10 @@ int main(int argc, char **argv) {
             parse_args(argc, argv);
 
         std::unique_ptr<PoseEstimator> pose_estimator;
-        std::array<std::array<float, 2>, 3> reference_triangle_px{};
-        bool have_reference_triangle = false;
 
         if (!options.pose_config_path.empty()) {
             PoseConfig pose_cfg =
                 load_pose_config(options.pose_config_path);
-
-            // Match PoseEstimator's object frame: translation refers to
-            // the centroid of the three LED positions, in millimeters.
-            const cv::Point3d led_centroid =
-                (pose_cfg.led_points_mm[0] +
-                 pose_cfg.led_points_mm[1] +
-                 pose_cfg.led_points_mm[2]) * (1.0 / 3.0);
-            std::vector<cv::Point3d> centered_leds;
-            centered_leds.reserve(3);
-            for (const auto &p : pose_cfg.led_points_mm)
-                centered_leds.push_back(p - led_centroid);
-
-            std::vector<cv::Point2d> projected_reference;
-            cv::projectPoints(
-                centered_leds,
-                cv::Vec3d(0.0, 0.0, 0.0),
-                cv::Vec3d(0.0, 0.0, 200.0),
-                cv::Mat(pose_cfg.camera_matrix),
-                pose_cfg.dist_coeffs,
-                projected_reference);
-            if (projected_reference.size() != 3)
-                throw std::runtime_error("Reference triangle projection failed.");
-            for (std::size_t id = 0; id < 3; ++id) {
-                if (!std::isfinite(projected_reference[id].x) ||
-                    !std::isfinite(projected_reference[id].y))
-                    throw std::runtime_error("Reference triangle projection is not finite.");
-                reference_triangle_px[id] = {
-                    static_cast<float>(projected_reference[id].x),
-                    static_cast<float>(projected_reference[id].y)};
-            }
-            have_reference_triangle = true;
-
-            std::ostringstream reference_message;
-            reference_message << std::fixed << std::setprecision(1)
-                << "Reference RPY 0, centroid XYZ (0,0,200) mm: "
-                << "165 (" << reference_triangle_px[0][0]
-                << ',' << reference_triangle_px[0][1] << "), "
-                << "366 (" << reference_triangle_px[1][0]
-                << ',' << reference_triangle_px[1][1] << "), "
-                << "596 (" << reference_triangle_px[2][0]
-                << ',' << reference_triangle_px[2][1] << ") px\n";
-            std::cout << reference_message.str();
 
             pose_estimator =
                 std::make_unique<PoseEstimator>(
@@ -1072,8 +1011,6 @@ int main(int argc, char **argv) {
             cfg.sensor_height = height;
             cfg.max_fps = options.display_fps;
             cfg.persistence_us = options.persistence_us;
-            cfg.show_reference_triangle = have_reference_triangle;
-            cfg.reference_triangle_px = reference_triangle_px;
 
             cfg.title =
                 options.show_raw
@@ -1161,19 +1098,11 @@ int main(int argc, char **argv) {
         // ----------------------------------------------------
 
         std::thread filter_thread([&] {
-            struct TraceSite {
-                int x, y, frequency;
-                const char *kind;
-                float cx, cy, r95;
-            };
-            std::vector<TraceSite> sites;
-            std::uint64_t trace_center_version = 0;
-            CenterSnapshot trace_centers;
             std::ofstream pixel_trace;
             if (!options.pixel_trace_csv.empty()) {
                 pixel_trace.open(options.pixel_trace_csv);
                 if (!pixel_trace) throw std::runtime_error("Cannot open pixel trace CSV");
-                pixel_trace << "t_us,x,y,polarity,dt_same_us,reason,timed_out,candidate_before,candidate_after,rise_dt0,rise_dt1,fall_dt0,fall_dt1,passed,classified_hz,target_hz,site,site_x,site_y,center_x,center_y,r95_px\n";
+                pixel_trace << "t_us,x,y,polarity,dt_same_us,reason,timed_out,candidate_before,candidate_after,rise_dt0,rise_dt1,fall_dt0,fall_dt1,passed,classified_hz\n";
             }
             std::vector<PixelState> pixels(
                 static_cast<std::size_t>(width)
@@ -1222,30 +1151,6 @@ int main(int argc, char **argv) {
 
                 center_worker.begin_batch();
 
-                // A center snapshot is based on previous batches. Sampling
-                // must never feed back into the classifier for this batch.
-                if (options.trace_follow_centers &&
-                    center_store.copy_if_new(trace_center_version, trace_centers)) {
-                    sites.clear();
-                    for (int id = 0; id < 3; ++id) {
-                        const auto &c = trace_centers.frequency[id];
-                        if (!c.valid) continue;
-                        const int cx = static_cast<int>(std::lround(c.x));
-                        const int cy = static_cast<int>(std::lround(c.y));
-                        if (cx < 0 || cx >= width || cy < 0 || cy >= height) continue;
-                        const int f = id == 0 ? 165 : id == 1 ? 366 : 596;
-                        sites.push_back({cx, cy, f, "center", c.x, c.y, c.p95_radius});
-                        const int gap = static_cast<int>(std::ceil(c.p95_radius)) +
-                            options.trace_margin_px + options.trace_patch_px + 1;
-                        int outside_x = cx + gap;
-                        if (outside_x + options.trace_patch_px >= width)
-                            outside_x = cx - gap;
-                        if (outside_x - options.trace_patch_px >= 0 &&
-                            outside_x + options.trace_patch_px < width)
-                            sites.push_back({outside_x, cy, f, "outside", c.x, c.y, c.p95_radius});
-                    }
-                }
-
                 for (std::uint64_t seq = tail;
                      seq < head;
                      ++seq)
@@ -1273,12 +1178,8 @@ int main(int argc, char **argv) {
                         ];
 
                     const bool selected = pixel_trace &&
-                        (std::find(options.trace_pixels.begin(), options.trace_pixels.end(),
-                                   std::make_pair(x, y)) != options.trace_pixels.end() ||
-                         std::any_of(sites.begin(), sites.end(), [&](const TraceSite &site) {
-                             return std::abs(static_cast<int>(x) - site.x) <= options.trace_patch_px &&
-                                    std::abs(static_cast<int>(y) - site.y) <= options.trace_patch_px;
-                         }));
+                        std::find(options.trace_pixels.begin(), options.trace_pixels.end(),
+                                  std::make_pair(x, y)) != options.trace_pixels.end();
                     DecisionTrace decision;
                     const auto before = state.candidate;
                     const Result r = process_event(state, p, t,
@@ -1287,26 +1188,13 @@ int main(int argc, char **argv) {
                         auto label = [](std::uint8_t id) -> int {
                             return id == NO_CANDIDATE ? 0 : (id == 0 ? 165 : id == 1 ? 366 : 596);
                         };
-                        const auto write_row = [&](int target, const char *kind,
-                                                   int sx, int sy, float cx, float cy, float r95) {
-                            pixel_trace << t << ',' << x << ',' << y << ',' << (p ? 1 : 0)
-                                << ',' << decision.dt_us << ',' << decision.reason << ','
-                                << (decision.timed_out ? 1 : 0) << ',' << label(before)
-                                << ',' << label(state.candidate) << ','
-                                << state.rise_periods.dt0 << ',' << state.rise_periods.dt1 << ','
-                                << state.fall_periods.dt0 << ',' << state.fall_periods.dt1 << ','
-                                << (r.passed ? 1 : 0) << ',' << label(r.id) << ','
-                                << target << ',' << kind << ',' << sx << ',' << sy << ','
-                                << cx << ',' << cy << ',' << r95 << '\n';
-                        };
-                        if (std::find(options.trace_pixels.begin(), options.trace_pixels.end(),
-                                      std::make_pair(x, y)) != options.trace_pixels.end())
-                            write_row(0, "fixed", x, y, 0, 0, 0);
-                        for (const auto &site : sites)
-                            if (std::abs(static_cast<int>(x) - site.x) <= options.trace_patch_px &&
-                                std::abs(static_cast<int>(y) - site.y) <= options.trace_patch_px)
-                                write_row(site.frequency, site.kind, site.x, site.y,
-                                          site.cx, site.cy, site.r95);
+                        pixel_trace << t << ',' << x << ',' << y << ',' << (p ? 1 : 0)
+                            << ',' << decision.dt_us << ',' << decision.reason << ','
+                            << (decision.timed_out ? 1 : 0) << ',' << label(before)
+                            << ',' << label(state.candidate) << ','
+                            << state.rise_periods.dt0 << ',' << state.rise_periods.dt1 << ','
+                            << state.fall_periods.dt0 << ',' << state.fall_periods.dt1 << ','
+                            << (r.passed ? 1 : 0) << ',' << label(r.id) << '\n';
                     }
 
                     if (r.passed) {

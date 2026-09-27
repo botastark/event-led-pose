@@ -8,7 +8,6 @@
 #include <cmath>
 #include <cstddef>
 #include <iomanip>
-#include <iostream>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -189,16 +188,6 @@ FastEventViewer::FastEventViewer(const Config &cfg,
       center_store_(center_store),
       raw_ring_(cfg.raw_ring_capacity),
       freq_ring_(cfg.freq_ring_capacity) {
-    std::cout << "Viewer reference overlay: "
-              << (cfg_.show_reference_triangle ? "ON" : "OFF");
-    if (cfg_.show_reference_triangle) {
-        for (std::size_t id = 0; id < 3; ++id) {
-            std::cout << " [" << id << ": "
-                      << cfg_.reference_triangle_px[id][0] << ", "
-                      << cfg_.reference_triangle_px[id][1] << "]";
-        }
-    }
-    std::cout << '\n';
     raw_points_.reserve(cfg_.max_raw_points_per_render);
     freq_points_.reserve(cfg_.max_freq_points_per_render);
     center_lines_.reserve(20u * CENTER_FREQ_COUNT);
@@ -793,8 +782,6 @@ void FastEventViewer::draw_points(
 void FastEventViewer::draw_centers() {
     center_lines_.clear();
     stat_circle_lines_.clear();
-    std::vector<Point> reference_lines;
-    reference_lines.reserve(96);
     std::vector<Point> distance_lines;
     struct DistanceLabel {
         float x;
@@ -803,51 +790,7 @@ void FastEventViewer::draw_centers() {
     };
     std::vector<DistanceLabel> distance_labels;
     distance_lines.reserve(6);
-    distance_labels.reserve(7);
-
-    if (cfg_.show_reference_triangle) {
-        const auto clamp_x = [&](double x) {
-            return static_cast<std::uint16_t>(std::clamp(
-                static_cast<int>(std::lround(x)), 0, cfg_.sensor_width - 1));
-        };
-        const auto clamp_y = [&](double y) {
-            return static_cast<std::uint16_t>(std::clamp(
-                static_cast<int>(std::lround(y)), 0, cfg_.sensor_height - 1));
-        };
-        const auto add_segment = [&](double x0, double y0,
-                                     double x1, double y1) {
-            reference_lines.push_back(Point{
-                clamp_x(x0),clamp_y(y0),0, 50,235,235,0});
-            reference_lines.push_back(Point{
-                clamp_x(x1),clamp_y(y1),0, 50,235,235,0});
-        };
-        constexpr int frequency_hz[] = {165,366,596};
-        for (std::size_t id = 0; id < 3; ++id) {
-            const auto &a = cfg_.reference_triangle_px[id];
-            const auto &b = cfg_.reference_triangle_px[(id + 1) % 3];
-            const double dx = static_cast<double>(b[0]) - a[0];
-            const double dy = static_cast<double>(b[1]) - a[1];
-            const double length = std::hypot(dx,dy);
-            if (length > 0.0) {
-                // 9 px line followed by 7 px gap, in sensor coordinates.
-                for (double first = 0.0; first < length; first += 16.0) {
-                    const double last = std::min(first + 9.0,length);
-                    add_segment(a[0] + dx * first / length,
-                                a[1] + dy * first / length,
-                                a[0] + dx * last / length,
-                                a[1] + dy * last / length);
-                }
-            }
-            add_segment(a[0]-5,a[1],a[0]+5,a[1]);
-            add_segment(a[0],a[1]-5,a[0],a[1]+5);
-            distance_labels.push_back(DistanceLabel{
-                a[0] + 24.0f,a[1] - 15.0f,
-                "R" + std::to_string(frequency_hz[id])});
-        }
-        distance_labels.push_back(DistanceLabel{
-            static_cast<float>(cfg_.sensor_width) - 155.0f, 14.0f,
-            "REF Z 200 MM RPY 0 0 0"});
-    }
+    distance_labels.reserve(3);
 
     const int half =
         std::max(
@@ -1053,11 +996,6 @@ void FastEventViewer::draw_centers() {
                 static_cast<float>((from.y + to.y) * 0.5) + shift_y,
                 name.str()});
         }
-    }
-
-    if (!reference_lines.empty()) {
-        glLineWidth(2.0f);
-        draw_points(reference_lines, GL_LINES);
     }
 
     if (!stat_circle_lines_.empty()) {
@@ -1540,7 +1478,6 @@ void FastEventViewer::draw_pose_overlay(
             if (c.rejection_flags & RejectFit) row << " FIT";
             if (c.rejection_flags & RejectTranslation) row << " T-JUMP";
             if (c.rejection_flags & RejectRotation) row << " R-JUMP";
-            if (c.rejection_flags & RejectOrientationPrior) row << " ORIENTATION-PRIOR";
             if (c.rejection_flags & RejectNonfinite) row << " NONFINITE";
         }
         lines.push_back(row.str());

@@ -13,7 +13,8 @@ namespace event_led_pose {
 enum PoseRejection : unsigned {
     RejectDepth = 1u, RejectRoll = 2u, RejectPitch = 4u,
     RejectYaw = 8u, RejectFit = 16u, RejectTranslation = 32u,
-    RejectRotation = 64u, RejectNonfinite = 128u
+    RejectRotation = 64u, RejectNonfinite = 128u,
+    RejectOrientationPrior = 256u, RejectRollJump = 512u
 };
 
 struct PoseCandidate {
@@ -72,10 +73,25 @@ struct PoseConfig {
     // Temporal continuity. Set <= 0 to disable a gate.
     double max_translation_jump_mm = 250.0;
     double max_rotation_jump_deg = 45.0;
+    // Optional roll-specific temporal gate. Set <= 0 to disable.
+    double max_roll_jump_deg = 0.0;
 
     // Candidate ranking after hard gates.
     double translation_cost_per_mm = 0.01;
     double rotation_cost_per_deg = 0.05;
+
+    // Optional stationary/upright reference prior. A nonpositive maximum
+    // disables it; only enable when the marker roll is known approximately.
+    double roll_prior_deg = 0.0;
+    double max_roll_prior_error_deg = 0.0;
+    double roll_prior_cost_per_deg = 0.25;
+
+    // Optional full orientation prior for a known reference pose. An
+    // eligible solution may recover across a rotation jump; translation,
+    // depth, quality and angular limits still apply.
+    double reference_pitch_deg = 0.0;
+    double reference_yaw_deg = 0.0;
+    double max_orientation_error_deg = 0.0;
 };
 
 PoseConfig load_pose_config(const std::string &path);
@@ -102,6 +118,8 @@ private:
     bool have_previous_ = false;
     cv::Vec3d previous_tvec_{0.0, 0.0, 0.0};
     cv::Matx33d previous_R_ = cv::Matx33d::eye();
+
+    cv::Matx33d reference_R_ = cv::Matx33d::eye();
 
     static cv::Vec3d rotation_to_rpy_deg(const cv::Matx33d &R);
     static double rotation_distance_deg(

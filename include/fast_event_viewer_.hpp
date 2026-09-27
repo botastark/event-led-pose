@@ -6,7 +6,6 @@
 #include "spsc_ring.hpp"
 
 #include <atomic>
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -52,11 +51,6 @@ public:
         // sensor/event viewport. This does not alter the window title.
         bool show_pose_overlay = true;
         int pose_text_scale = 2;
-
-        // Fixed, calibrated projection of the centered LED target at
-        // R=I, t=(0,0,200) mm. Filled by live_frequency_center at startup.
-        bool show_reference_triangle = false;
-        std::array<std::array<float, 2>, 3> reference_triangle_px{};
 
         std::string title = "Raw + frequency + spatial stats";
     };

@@ -9,8 +9,6 @@
 #include <metavision/sdk/stream/camera.h>
 #include <metavision/hal/facilities/i_ll_biases.h>
 
-#include <opencv2/calib3d.hpp>
-
 #include <array>
 #include <algorithm>
 #include <atomic>
@@ -880,54 +878,10 @@ int main(int argc, char **argv) {
             parse_args(argc, argv);
 
         std::unique_ptr<PoseEstimator> pose_estimator;
-        std::array<std::array<float, 2>, 3> reference_triangle_px{};
-        bool have_reference_triangle = false;
 
         if (!options.pose_config_path.empty()) {
             PoseConfig pose_cfg =
                 load_pose_config(options.pose_config_path);
-
-            // Match PoseEstimator's object frame: translation refers to
-            // the centroid of the three LED positions, in millimeters.
-            const cv::Point3d led_centroid =
-                (pose_cfg.led_points_mm[0] +
-                 pose_cfg.led_points_mm[1] +
-                 pose_cfg.led_points_mm[2]) * (1.0 / 3.0);
-            std::vector<cv::Point3d> centered_leds;
-            centered_leds.reserve(3);
-            for (const auto &p : pose_cfg.led_points_mm)
-                centered_leds.push_back(p - led_centroid);
-
-            std::vector<cv::Point2d> projected_reference;
-            cv::projectPoints(
-                centered_leds,
-                cv::Vec3d(0.0, 0.0, 0.0),
-                cv::Vec3d(0.0, 0.0, 200.0),
-                cv::Mat(pose_cfg.camera_matrix),
-                pose_cfg.dist_coeffs,
-                projected_reference);
-            if (projected_reference.size() != 3)
-                throw std::runtime_error("Reference triangle projection failed.");
-            for (std::size_t id = 0; id < 3; ++id) {
-                if (!std::isfinite(projected_reference[id].x) ||
-                    !std::isfinite(projected_reference[id].y))
-                    throw std::runtime_error("Reference triangle projection is not finite.");
-                reference_triangle_px[id] = {
-                    static_cast<float>(projected_reference[id].x),
-                    static_cast<float>(projected_reference[id].y)};
-            }
-            have_reference_triangle = true;
-
-            std::ostringstream reference_message;
-            reference_message << std::fixed << std::setprecision(1)
-                << "Reference RPY 0, centroid XYZ (0,0,200) mm: "
-                << "165 (" << reference_triangle_px[0][0]
-                << ',' << reference_triangle_px[0][1] << "), "
-                << "366 (" << reference_triangle_px[1][0]
-                << ',' << reference_triangle_px[1][1] << "), "
-                << "596 (" << reference_triangle_px[2][0]
-                << ',' << reference_triangle_px[2][1] << ") px\n";
-            std::cout << reference_message.str();
 
             pose_estimator =
                 std::make_unique<PoseEstimator>(
@@ -1072,8 +1026,6 @@ int main(int argc, char **argv) {
             cfg.sensor_height = height;
             cfg.max_fps = options.display_fps;
             cfg.persistence_us = options.persistence_us;
-            cfg.show_reference_triangle = have_reference_triangle;
-            cfg.reference_triangle_px = reference_triangle_px;
 
             cfg.title =
                 options.show_raw
@@ -1169,11 +1121,16 @@ int main(int argc, char **argv) {
             std::vector<TraceSite> sites;
             std::uint64_t trace_center_version = 0;
             CenterSnapshot trace_centers;
+            std::uint64_t trace_rows = 0;
+            std::uint64_t trace_valid_snapshots = 0;
+            auto last_trace_report = std::chrono::steady_clock::now();
+            auto last_trace_flush = last_trace_report;
             std::ofstream pixel_trace;
             if (!options.pixel_trace_csv.empty()) {
                 pixel_trace.open(options.pixel_trace_csv);
                 if (!pixel_trace) throw std::runtime_error("Cannot open pixel trace CSV");
                 pixel_trace << "t_us,x,y,polarity,dt_same_us,reason,timed_out,candidate_before,candidate_after,rise_dt0,rise_dt1,fall_dt0,fall_dt1,passed,classified_hz,target_hz,site,site_x,site_y,center_x,center_y,r95_px\n";
+                pixel_trace.flush();
             }
             std::vector<PixelState> pixels(
                 static_cast<std::size_t>(width)
@@ -1226,6 +1183,7 @@ int main(int argc, char **argv) {
                 // must never feed back into the classifier for this batch.
                 if (options.trace_follow_centers &&
                     center_store.copy_if_new(trace_center_version, trace_centers)) {
+                    ++trace_valid_snapshots;
                     sites.clear();
                     for (int id = 0; id < 3; ++id) {
                         const auto &c = trace_centers.frequency[id];
@@ -1298,6 +1256,7 @@ int main(int argc, char **argv) {
                                 << (r.passed ? 1 : 0) << ',' << label(r.id) << ','
                                 << target << ',' << kind << ',' << sx << ',' << sy << ','
                                 << cx << ',' << cy << ',' << r95 << '\n';
+                            ++trace_rows;
                         };
                         if (std::find(options.trace_pixels.begin(), options.trace_pixels.end(),
                                       std::make_pair(x, y)) != options.trace_pixels.end())
@@ -1341,6 +1300,21 @@ int main(int argc, char **argv) {
 
                 center_worker.end_batch();
 
+                if (pixel_trace) {
+                    const auto now = std::chrono::steady_clock::now();
+                    if (now - last_trace_flush >= std::chrono::milliseconds(100)) {
+                        pixel_trace.flush();
+                        last_trace_flush = now;
+                    }
+                    if (now - last_trace_report >= std::chrono::seconds(1)) {
+                        std::cerr << "Trace: " << trace_rows << " rows, "
+                                  << trace_valid_snapshots << " center snapshots, "
+                                  << sites.size() << " active sites; passed "
+                                  << local_passed << " events\n";
+                        last_trace_report = now;
+                    }
+                }
+
                 filter_input.consumer_commit(head);
             }
 
@@ -1356,6 +1330,12 @@ int main(int argc, char **argv) {
                 freq_counts[i].store(
                     local_counts[i],
                     std::memory_order_relaxed);
+            }
+            if (pixel_trace) {
+                pixel_trace.flush();
+                std::cerr << "Trace final: " << trace_rows << " rows, "
+                          << trace_valid_snapshots << " center snapshots, "
+                          << sites.size() << " active sites\n";
             }
         });
 
@@ -1388,6 +1368,7 @@ int main(int argc, char **argv) {
                 }
 
                 std::uint64_t local_drops = 0;
+                std::uint32_t unpublished_events = 0;
 
                 for (const EventCD *ev = begin;
                      ev != end;
@@ -1403,8 +1384,21 @@ int main(int argc, char **argv) {
                                 ev->t));
 
                     if (!options.input_raw.empty()) {
-                        while (!filter_input.producer_push(pe))
+                        // Publish partial callback batches. Otherwise a RAW
+                        // decoder callback larger than the ring can fill its
+                        // unpublished portion and wait forever: the consumer
+                        // cannot see those events until producer_end().
+                        while (!filter_input.producer_push(pe)) {
+                            filter_input.producer_end();
+                            unpublished_events = 0;
                             std::this_thread::yield();
+                            filter_input.producer_begin();
+                        }
+                        if (++unpublished_events >= 8192) {
+                            filter_input.producer_end();
+                            filter_input.producer_begin();
+                            unpublished_events = 0;
+                        }
                     } else if (!filter_input.producer_push(pe)) {
                         ++local_drops;
                     }
@@ -1452,7 +1446,7 @@ int main(int argc, char **argv) {
         else {
             std::cout
                 << "Parallel transition-ring filter + center worker running.\n"
-                << "Press ENTER to stop.\n";
+                << (options.input_raw.empty() ? "Press ENTER to stop.\n" : "Replaying RAW file to end.\n");
 
             if (options.input_raw.empty()) std::cin.get();
             else while (camera.is_running())

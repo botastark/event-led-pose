@@ -8,7 +8,6 @@
 #include <cmath>
 #include <cstddef>
 #include <iomanip>
-#include <iostream>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -189,16 +188,6 @@ FastEventViewer::FastEventViewer(const Config &cfg,
       center_store_(center_store),
       raw_ring_(cfg.raw_ring_capacity),
       freq_ring_(cfg.freq_ring_capacity) {
-    std::cout << "Viewer reference overlay: "
-              << (cfg_.show_reference_triangle ? "ON" : "OFF");
-    if (cfg_.show_reference_triangle) {
-        for (std::size_t id = 0; id < 3; ++id) {
-            std::cout << " [" << id << ": "
-                      << cfg_.reference_triangle_px[id][0] << ", "
-                      << cfg_.reference_triangle_px[id][1] << "]";
-        }
-    }
-    std::cout << '\n';
     raw_points_.reserve(cfg_.max_raw_points_per_render);
     freq_points_.reserve(cfg_.max_freq_points_per_render);
     center_lines_.reserve(20u * CENTER_FREQ_COUNT);
@@ -1540,7 +1529,6 @@ void FastEventViewer::draw_pose_overlay(
             if (c.rejection_flags & RejectFit) row << " FIT";
             if (c.rejection_flags & RejectTranslation) row << " T-JUMP";
             if (c.rejection_flags & RejectRotation) row << " R-JUMP";
-            if (c.rejection_flags & RejectOrientationPrior) row << " ORIENTATION-PRIOR";
             if (c.rejection_flags & RejectNonfinite) row << " NONFINITE";
         }
         lines.push_back(row.str());

@@ -14,6 +14,19 @@ namespace {
 
 constexpr double RAD_TO_DEG = 57.2957795130823208768;
 
+cv::Matx33d rpy_to_rotation(double roll_deg, double pitch_deg, double yaw_deg) {
+    const double r = roll_deg / RAD_TO_DEG;
+    const double p = pitch_deg / RAD_TO_DEG;
+    const double y = yaw_deg / RAD_TO_DEG;
+    const double cr = std::cos(r), sr = std::sin(r);
+    const double cp = std::cos(p), sp = std::sin(p);
+    const double cy = std::cos(y), sy = std::sin(y);
+    return cv::Matx33d(
+        cy*cp, cy*sp*sr-sy*cr, cy*sp*cr+sy*sr,
+        sy*cp, sy*sp*sr+cy*cr, sy*sp*cr-cy*sr,
+        -sp, cp*sr, cp*cr);
+}
+
 cv::Vec2d read_range(
     const cv::FileNode &node,
     const cv::Vec2d &fallback)
@@ -149,6 +162,10 @@ PoseConfig load_pose_config(const std::string &path) {
             cfg.max_rotation_jump_deg =
                 static_cast<double>(continuity["max_rotation_jump_deg"]);
 
+        if (!continuity["max_roll_jump_deg"].empty())
+            cfg.max_roll_jump_deg =
+                static_cast<double>(continuity["max_roll_jump_deg"]);
+
         if (!continuity["translation_cost_per_mm"].empty())
             cfg.translation_cost_per_mm =
                 static_cast<double>(continuity["translation_cost_per_mm"]);
@@ -158,12 +175,52 @@ PoseConfig load_pose_config(const std::string &path) {
                 static_cast<double>(continuity["rotation_cost_per_deg"]);
     }
 
+    if (!std::isfinite(cfg.max_roll_jump_deg) ||
+        cfg.max_roll_jump_deg < 0.0 || cfg.max_roll_jump_deg > 180.0)
+        throw std::runtime_error("pose config: invalid continuity.max_roll_jump_deg");
+
+    const cv::FileNode prior = fs["orientation_prior"];
+    if (!prior.empty()) {
+        if (!prior["roll_deg"].empty())
+            cfg.roll_prior_deg = static_cast<double>(prior["roll_deg"]);
+        if (!prior["max_roll_error_deg"].empty())
+            cfg.max_roll_prior_error_deg =
+                static_cast<double>(prior["max_roll_error_deg"]);
+        if (!prior["roll_cost_per_deg"].empty())
+            cfg.roll_prior_cost_per_deg =
+                static_cast<double>(prior["roll_cost_per_deg"]);
+        if (!prior["pitch_deg"].empty())
+            cfg.reference_pitch_deg = static_cast<double>(prior["pitch_deg"]);
+        if (!prior["yaw_deg"].empty())
+            cfg.reference_yaw_deg = static_cast<double>(prior["yaw_deg"]);
+        if (!prior["max_orientation_error_deg"].empty())
+            cfg.max_orientation_error_deg =
+                static_cast<double>(prior["max_orientation_error_deg"]);
+
+        if (!std::isfinite(cfg.roll_prior_deg) ||
+            !std::isfinite(cfg.max_roll_prior_error_deg) ||
+            !std::isfinite(cfg.roll_prior_cost_per_deg) ||
+            !std::isfinite(cfg.reference_pitch_deg) ||
+            !std::isfinite(cfg.reference_yaw_deg) ||
+            !std::isfinite(cfg.max_orientation_error_deg) ||
+            cfg.max_roll_prior_error_deg < 0.0 ||
+            cfg.max_roll_prior_error_deg > 180.0 ||
+            cfg.max_orientation_error_deg < 0.0 ||
+            cfg.max_orientation_error_deg > 180.0 ||
+            cfg.roll_prior_cost_per_deg < 0.0)
+            throw std::runtime_error("pose config: invalid orientation_prior");
+    }
+
     return cfg;
 }
 
 PoseEstimator::PoseEstimator(PoseConfig config)
     : config_(std::move(config))
 {
+    reference_R_ = rpy_to_rotation(
+        config_.roll_prior_deg,
+        config_.reference_pitch_deg,
+        config_.reference_yaw_deg);
     const cv::Point3d centroid =
         (config_.led_points_mm[0] +
          config_.led_points_mm[1] +
@@ -360,10 +417,24 @@ PoseResult PoseEstimator::estimate(
         candidate.rpy_deg = rpy;
         if (!within(rpy[0], config_.roll_deg))
             candidate.rejection_flags |= RejectRoll;
+        // Roll is periodic: +179 and -179 degrees are only 2 degrees apart.
+        const double roll_prior_error = std::abs(std::remainder(
+            rpy[0] - config_.roll_prior_deg, 360.0));
+        if (config_.max_roll_prior_error_deg > 0.0 &&
+            roll_prior_error > config_.max_roll_prior_error_deg)
+            candidate.rejection_flags |= RejectRoll;
         if (!within(rpy[1], config_.pitch_deg))
             candidate.rejection_flags |= RejectPitch;
         if (!within(rpy[2], config_.yaw_deg))
             candidate.rejection_flags |= RejectYaw;
+
+        const double orientation_prior_error = rotation_distance_deg(
+            R, reference_R_);
+        const bool reference_match =
+            config_.max_orientation_error_deg > 0.0 &&
+            orientation_prior_error <= config_.max_orientation_error_deg;
+        if (config_.max_orientation_error_deg > 0.0 && !reference_match)
+            candidate.rejection_flags |= RejectOrientationPrior;
 
         std::vector<cv::Point2d> projected;
         cv::projectPoints(
@@ -392,13 +463,30 @@ PoseResult PoseEstimator::estimate(
             translation_jump = cv::norm(tvec - previous_tvec_);
             rotation_jump = rotation_distance_deg(R, previous_R_);
 
+            // Only an already tracked pose OUTSIDE an explicitly configured
+            // reference can recover across a large angular jump. Otherwise
+            // the reference prior must not cause arbitrary branch switches.
+            const bool recover_wrong_branch = reference_match &&
+                rotation_distance_deg(previous_R_, reference_R_) >
+                    config_.max_orientation_error_deg;
+
             if (config_.max_translation_jump_mm > 0.0 &&
                 translation_jump > config_.max_translation_jump_mm)
             {
                 candidate.rejection_flags |= RejectTranslation;
             }
 
-            if (config_.max_rotation_jump_deg > 0.0 &&
+            const double previous_roll =
+                rotation_to_rpy_deg(previous_R_)[0];
+            const double roll_jump = std::abs(std::remainder(
+                rpy[0] - previous_roll, 360.0));
+            if (!recover_wrong_branch &&
+                config_.max_roll_jump_deg > 0.0 &&
+                roll_jump > config_.max_roll_jump_deg)
+                candidate.rejection_flags |= RejectRollJump;
+
+            if (!recover_wrong_branch &&
+                config_.max_rotation_jump_deg > 0.0 &&
                 rotation_jump > config_.max_rotation_jump_deg)
             {
                 candidate.rejection_flags |= RejectRotation;
@@ -424,7 +512,13 @@ PoseResult PoseEstimator::estimate(
         const double cost =
             reproj_rms +
             config_.translation_cost_per_mm * translation_jump +
-            config_.rotation_cost_per_deg * rotation_jump;
+            config_.rotation_cost_per_deg * rotation_jump +
+            (config_.max_roll_prior_error_deg > 0.0
+                ? config_.roll_prior_cost_per_deg * roll_prior_error
+                : 0.0) +
+            (config_.max_orientation_error_deg > 0.0
+                ? config_.roll_prior_cost_per_deg * orientation_prior_error
+                : 0.0);
 
         if (cost >= best_cost)
             continue;
